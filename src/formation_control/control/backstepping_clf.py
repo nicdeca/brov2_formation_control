@@ -25,8 +25,12 @@ with
     b = B.T e_nu.
 
 The optional scalar ``chi`` can contain known parent-motion or explicit
-time-dependence terms.  Unknown contributions can instead be omitted from the
-implemented CLF constraint and handled as perturbations in the analysis.
+time-dependence terms.  Additional auxiliary-state storage terms may be
+included in ``configuration_value`` provided that their derivatives with
+respect to optimized auxiliary inputs are supplied through
+``control_gradient_offset``.  Unknown contributions can instead be omitted
+from the implemented CLF constraint and handled as perturbations in the
+analysis.
 """
 
 from __future__ import annotations
@@ -155,6 +159,7 @@ class BacksteppingCLF:
         filtered_velocity_derivative: FloatArray,
         dynamics_bias: FloatArray,
         configuration_rate_offset: float = 0.0,
+        control_gradient_offset: FloatArray | None = None,
     ) -> BacksteppingCLFEvaluation:
         """Evaluate ``W`` and the affine modeled derivative ``a + b.T u``."""
         if configuration_value < 0.0:
@@ -203,6 +208,12 @@ class BacksteppingCLF:
 
         assert self.input_matrix is not None
         control_gradient = self.input_matrix.T @ velocity_error
+        if control_gradient_offset is not None:
+            control_gradient += _vector(
+                control_gradient_offset,
+                self.input_dim,
+                name="control_gradient_offset",
+            )
 
         return BacksteppingCLFEvaluation(
             value=value,

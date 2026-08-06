@@ -147,6 +147,7 @@ def build_wrench_space_controller(
     control_weight: FloatArray,
     slack_penalty: float,
     alpha: ClassKFunction,
+    slack_linear_penalty: float = 0.0,
     solver: str = "osqp",
 ) -> WrenchSpaceControllerDesign:
     """Build a controller whose QP decision variable is body wrench."""
@@ -160,6 +161,7 @@ def build_wrench_space_controller(
         qp=CLFQP(
             control_weight=np.asarray(control_weight, dtype=float),
             slack_penalty=slack_penalty,
+            slack_linear_penalty=slack_linear_penalty,
             alpha=alpha,
             control_set=wrench_polytope_control_set(polytope),
             solver=solver,

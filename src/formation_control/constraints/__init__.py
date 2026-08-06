@@ -10,6 +10,10 @@ from .fov import (
     PositiveDepthConstraint,
     VerticalFieldOfViewConstraint,
 )
+from .sensing_kinematics import (
+    SensingConstraintKinematics,
+    evaluate_sensing_constraint_kinematics,
+)
 
 __all__ = [
     "ConstraintEvaluation",
@@ -21,5 +25,7 @@ __all__ = [
     "NormalizedImagePoint",
     "PositiveDepthConstraint",
     "ScalarConstraint",
+    "SensingConstraintKinematics",
     "VerticalFieldOfViewConstraint",
+    "evaluate_sensing_constraint_kinematics",
 ]

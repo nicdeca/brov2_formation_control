@@ -72,10 +72,10 @@ class BlueROV2ControllerDesign:
         of course choose a different null-space allocation.
         """
         if self.control_space == "thruster":
-            forces = np.asarray(evaluation.optimized_input, dtype=float)
-            if forces.shape != (8,):
-                raise ValueError("thruster-space decision must have shape (8,).")
-            return forces.copy()
+            decision = np.asarray(evaluation.optimized_input, dtype=float)
+            if decision.ndim != 1 or decision.size < 8:
+                raise ValueError("thruster-space decision must contain at least eight inputs.")
+            return decision[:8].copy()
 
         wrench = np.asarray(evaluation.wrench_body, dtype=float)
         forces = self.minimum_effort_map @ wrench
@@ -100,6 +100,7 @@ def build_bluerov2_controller_design(
     virtual_gain: FloatArray | None = None,
     filter_bandwidth: float | FloatArray | None = None,
     slack_penalty: float = 5e3,
+    slack_linear_penalty: float = 100.0,
     alpha_gain: float = 0.8,
 ) -> BlueROV2ControllerDesign:
     """Build the canonical Heavy controller in thruster or wrench coordinates."""
@@ -144,6 +145,7 @@ def build_bluerov2_controller_design(
             qp=CLFQP(
                 control_weight=thruster_weight,
                 slack_penalty=slack_penalty,
+                slack_linear_penalty=slack_linear_penalty,
                 alpha=alpha,
                 control_set=PolyhedralControlSet.box(
                     allocation.lower_bounds,
@@ -159,6 +161,7 @@ def build_bluerov2_controller_design(
             polytope=wrench_polytope,
             control_weight=wrench_weight,
             slack_penalty=slack_penalty,
+            slack_linear_penalty=slack_linear_penalty,
             alpha=alpha,
         ).controller
 

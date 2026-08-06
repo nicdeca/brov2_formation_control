@@ -198,6 +198,11 @@ class BlueROV2AgentController:
         filter_state: FloatArray,
         parent_linear_velocity_inertial: FloatArray | None = None,
         feedforward_velocity_body: FloatArray | None = None,
+        configuration_value_offset: float = 0.0,
+        control_gradient_offset: FloatArray | None = None,
+        control_reference: FloatArray | None = None,
+        control_lower: FloatArray | None = None,
+        control_upper: FloatArray | None = None,
     ) -> BlueROV2AgentEvaluation:
         """Evaluate one BlueROV2 follower control cycle.
 
@@ -211,6 +216,11 @@ class BlueROV2AgentController:
         included in the implemented CLF derivative.  If it is omitted, the QP
         uses zero for that term and the actual parent motion can be treated as
         an interconnection perturbation in the analysis.
+
+        ``configuration_value_offset`` can add a nonnegative auxiliary-state
+        storage term to the CLF without changing the robot configuration
+        gradient.  Its derivative with respect to optimized auxiliary inputs
+        must be supplied consistently through ``control_gradient_offset``.
         """
         _, _, generalized_velocity = self.model.split_state(follower_state)
 
@@ -229,14 +239,21 @@ class BlueROV2AgentController:
             )
             configuration_rate_offset = float(potential.target_position_gradient @ parent_velocity)
 
+        if not np.isfinite(configuration_value_offset) or (configuration_value_offset < 0.0):
+            raise ValueError("configuration_value_offset must be finite and nonnegative.")
+
         controller_evaluation = self.dynamics_controller.evaluate(
-            configuration_value=potential.value,
+            configuration_value=(potential.value + configuration_value_offset),
             configuration_gradient=zeta,
             generalized_velocity=generalized_velocity,
             filter_state=filter_state,
             dynamics_bias=self.model.drift_wrench(follower_state),
             configuration_rate_offset=configuration_rate_offset,
             feedforward_velocity=feedforward_velocity_body,
+            control_gradient_offset=control_gradient_offset,
+            control_reference=control_reference,
+            control_lower=control_lower,
+            control_upper=control_upper,
         )
 
         input_matrix = self.dynamics_controller.clf.input_matrix

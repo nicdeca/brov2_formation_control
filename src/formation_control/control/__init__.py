@@ -5,6 +5,11 @@ from .adaptation import (
     AdaptiveDomainState,
     AdaptiveEnlargementLaw,
 )
+from .adaptive_domain_guard import (
+    AdaptiveDomainGuardResult,
+    AdaptiveDomainLimitError,
+    project_adaptive_domain,
+)
 from .backstepping_clf import BacksteppingCLF, BacksteppingCLFEvaluation
 from .bluerov2 import BlueROV2AgentController, BlueROV2AgentEvaluation
 from .bluerov2_design import (
@@ -34,6 +39,12 @@ from .filters import (
     FirstOrderCommandFilter,
     SecondOrderCommandFilter,
 )
+from .funnel_relaxation import (
+    FUNNEL_CHANNELS,
+    FunnelRelaxationEvaluation,
+    FunnelRelaxationInfeasibleError,
+    FunnelRelaxationPolicy,
+)
 from .second_order import (
     SecondOrderCLFQPController,
     SecondOrderControllerEvaluation,
@@ -54,6 +65,8 @@ from .wrench_space import (
 
 __all__ = [
     "AdaptiveDomainDynamics",
+    "AdaptiveDomainGuardResult",
+    "AdaptiveDomainLimitError",
     "AdaptiveDomainState",
     "AdaptiveEnlargementLaw",
     "BacksteppingCLF",
@@ -72,7 +85,11 @@ __all__ = [
     "CommandFilterEvaluation",
     "DoubleIntegratorAgentController",
     "DoubleIntegratorAgentEvaluation",
+    "FUNNEL_CHANNELS",
     "FirstOrderCommandFilter",
+    "FunnelRelaxationEvaluation",
+    "FunnelRelaxationInfeasibleError",
+    "FunnelRelaxationPolicy",
     "LinearClassK",
     "PolyhedralControlSet",
     "SaturatingClassK",
@@ -83,6 +100,7 @@ __all__ = [
     "VirtualVelocityGains",
     "WrenchSpaceControllerDesign",
     "box_clf_actuation_feasibility",
+    "project_adaptive_domain",
     "build_bluerov2_controller_design",
     "build_wrench_space_controller",
     "equivalent_wrench_weight",

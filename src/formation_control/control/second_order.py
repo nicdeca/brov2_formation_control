@@ -195,6 +195,10 @@ class SecondOrderCLFQPController:
         dynamics_bias: FloatArray,
         configuration_rate_offset: float = 0.0,
         feedforward_velocity: FloatArray | None = None,
+        control_gradient_offset: FloatArray | None = None,
+        control_reference: FloatArray | None = None,
+        control_lower: FloatArray | None = None,
+        control_upper: FloatArray | None = None,
     ) -> SecondOrderControllerEvaluation:
         """Evaluate one control cycle without advancing any dynamic state."""
         gradient = _vector(
@@ -230,9 +234,15 @@ class SecondOrderCLFQPController:
             filtered_velocity_derivative=filter_evaluation.output_derivative,
             dynamics_bias=dynamics_bias,
             configuration_rate_offset=configuration_rate_offset,
+            control_gradient_offset=control_gradient_offset,
         )
 
-        qp_result = self.qp.solve(clf_evaluation)
+        qp_result = self.qp.solve(
+            clf_evaluation,
+            control_reference=control_reference,
+            lower_override=control_lower,
+            upper_override=control_upper,
+        )
 
         return SecondOrderControllerEvaluation(
             desired_velocity=desired_velocity,

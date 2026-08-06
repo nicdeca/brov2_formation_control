@@ -50,6 +50,7 @@ class EdgePotentialEvaluation:
     target_position_gradient: FloatArray
     observer_orientation_gradient_body: FloatArray
     components: Mapping[str, float]
+    enlargement_derivatives: Mapping[str, float] | None = None
     observation: CameraObservation | None = None
 
     def __post_init__(self) -> None:
@@ -72,6 +73,17 @@ class EdgePotentialEvaluation:
             self,
             "components",
             MappingProxyType(components),
+        )
+
+        enlargement_derivatives = (
+            {} if self.enlargement_derivatives is None else dict(self.enlargement_derivatives)
+        )
+        if not all(np.isfinite(value) for value in enlargement_derivatives.values()):
+            raise ValueError("all enlargement derivatives must be finite.")
+        object.__setattr__(
+            self,
+            "enlargement_derivatives",
+            MappingProxyType(enlargement_derivatives),
         )
 
 
@@ -153,6 +165,7 @@ class EdgePotential:
         target_position_gradient = np.zeros(3)
         observer_orientation_gradient_body = np.zeros(3)
         components: dict[str, float] = {}
+        enlargement_derivatives: dict[str, float] = {}
 
         relative_terms = (
             ("formation", self.formation),
@@ -174,6 +187,13 @@ class EdgePotential:
             observer_position_gradient -= gradient_relative
             target_position_gradient += gradient_relative
             components[name] = evaluation.value
+            derivative = getattr(
+                potential,
+                "enlargement_derivative",
+                None,
+            )
+            if callable(derivative):
+                enlargement_derivatives[name] = float(derivative(relative_position))
 
         observation = None
 
@@ -214,6 +234,13 @@ class EdgePotential:
                 target_position_gradient += pose_gradient.target_position
                 observer_orientation_gradient_body += pose_gradient.observer_orientation_body
                 components[name] = evaluation.value
+                derivative = getattr(
+                    potential,
+                    "enlargement_derivative",
+                    None,
+                )
+                if callable(derivative):
+                    enlargement_derivatives[name] = float(derivative(observation.image_point))
 
         return EdgePotentialEvaluation(
             value=total_value,
@@ -221,5 +248,6 @@ class EdgePotential:
             target_position_gradient=target_position_gradient,
             observer_orientation_gradient_body=(observer_orientation_gradient_body),
             components=components,
+            enlargement_derivatives=enlargement_derivatives,
             observation=observation,
         )
