@@ -38,8 +38,8 @@ from formation_control.constraints import (
     evaluate_sensing_constraint_kinematics,
 )
 from formation_control.control import (
-    BlueROV2ControllerDesign,
     BlueROV2ControlSpace,
+    BlueROV2ControllerDesign,
     FunnelRelaxationInfeasibleError,
     FunnelRelaxationPolicy,
     build_bluerov2_controller_design,
@@ -55,6 +55,13 @@ from formation_control.geometry import (
 )
 from formation_control.graphs import DirectedSensingGraph
 from formation_control.models import BlueROV2Model
+from formation_control.simulation.realism import (
+    RealismConfig,
+    build_perturbed_plant_model,
+    delay_steps,
+    delayed_noisy_parent_position,
+    noisy_twist_state,
+)
 from formation_control.potentials import (
     AdaptiveConstraintBarrierPotential,
     ConstraintBarrierPotential,
@@ -71,13 +78,6 @@ from formation_control.simulation import (
 from formation_control.simulation.leader_references import (
     SmoothSpatialTrajectoryReference,
     VelocityCommandReferenceFilter,
-)
-from formation_control.simulation.realism import (
-    RealismConfig,
-    build_perturbed_plant_model,
-    delay_steps,
-    delayed_noisy_parent_position,
-    noisy_twist_state,
 )
 from formation_control.visualization import (
     BlueROV2HeavyVisualGeometry,
@@ -129,7 +129,9 @@ def look_at_quaternion(
     relative = np.asarray(relative_position_inertial, dtype=float)
     horizontal_norm = float(np.hypot(relative[0], relative[1]))
     yaw = float(np.arctan2(relative[1], relative[0]) + yaw_offset)
-    pitch = float(-np.arctan2(relative[2], horizontal_norm) + pitch_offset)
+    pitch = float(
+        -np.arctan2(relative[2], horizontal_norm) + pitch_offset
+    )
     return quaternion_from_roll_pitch_yaw(
         roll=0.0,
         pitch=pitch,
@@ -185,6 +187,68 @@ def build_balanced_tree_scenario() -> FormationScenario:
     )
 
 
+
+def build_readme_demo_scenario() -> FormationScenario:
+    """Seven-robot convergence demo with visibly displaced initial positions.
+
+    The desired geometry uses the same balanced directed tree as the long
+    validation examples.  The initial positions are deliberately asymmetric
+    and substantially displaced from the desired formation, while remaining
+    inside the physical range limits so that the animation emphasizes
+    formation acquisition rather than reference tracking.
+    """
+    graph = DirectedSensingGraph.from_edges(
+        7,
+        (
+            (1, 0),
+            (2, 0),
+            (3, 1),
+            (4, 1),
+            (5, 2),
+            (6, 2),
+        ),
+        root=0,
+    ).require_rooted_tree()
+
+    desired_offsets = np.array(
+        [
+            [0.00, 0.00, 0.00],
+            [-1.75, -0.70, -0.10],
+            [-1.75, 0.70, 0.10],
+            [-3.45, -1.35, -0.20],
+            [-3.45, -0.35, -0.05],
+            [-3.45, 0.35, 0.05],
+            [-3.45, 1.35, 0.20],
+        ],
+        dtype=float,
+    )
+    reference = FormationReference(offsets=desired_offsets)
+
+    root_position = np.array([0.0, 0.0, -1.5])
+
+    # Deliberately nonuniform displacements.  They are large enough to make
+    # convergence visually obvious but keep each follower close enough to its
+    # parent for the forward-looking camera model to start inside the physical
+    # sensing domain.
+    initial_offsets = np.array(
+        [
+            [0.00, 0.00, 0.00],
+            [-2.35, -0.20, 0.18],
+            [-1.30, 1.20, -0.18],
+            [-4.30, -0.80, 0.30],
+            [-2.80, -1.05, -0.28],
+            [-4.05, 0.05, 0.24],
+            [-2.95, 1.85, -0.22],
+        ],
+        dtype=float,
+    )
+
+    return FormationScenario(
+        graph=graph,
+        reference=reference,
+        initial_positions=root_position + initial_offsets,
+    )
+
 def build_initial_states(scenario: FormationScenario) -> np.ndarray:
     states = np.zeros((scenario.n_agents, 13), dtype=float)
 
@@ -199,7 +263,10 @@ def build_initial_states(scenario: FormationScenario) -> np.ndarray:
     for edge in scenario.graph:
         observer = edge.observer
         target = edge.target
-        relative = scenario.initial_positions[target] - scenario.initial_positions[observer]
+        relative = (
+            scenario.initial_positions[target]
+            - scenario.initial_positions[observer]
+        )
         sign = -1.0 if observer % 2 else 1.0
         depth = scenario.graph.depth(observer)
         states[observer, :3] = scenario.initial_positions[observer]
@@ -295,22 +362,30 @@ def build_barrier_templates(
 
     return EdgeBarrierTemplates(
         collision=AdaptiveConstraintBarrierPotential(
-            constraint=MinimumDistanceConstraint(distance_domain.d_min_conservative),
+            constraint=MinimumDistanceConstraint(
+                distance_domain.d_min_conservative
+            ),
             reference_state=desired_relative,
             weight=0.18,
         ),
         sensing_range=AdaptiveConstraintBarrierPotential(
-            constraint=MaximumDistanceConstraint(distance_domain.d_max_conservative),
+            constraint=MaximumDistanceConstraint(
+                distance_domain.d_max_conservative
+            ),
             reference_state=desired_relative,
             weight=0.18,
         ),
         horizontal_fov=AdaptiveConstraintBarrierPotential(
-            constraint=HorizontalFieldOfViewConstraint(fov_domain.alpha_h_conservative),
+            constraint=HorizontalFieldOfViewConstraint(
+                fov_domain.alpha_h_conservative
+            ),
             reference_state=desired_image,
             weight=0.25,
         ),
         vertical_fov=AdaptiveConstraintBarrierPotential(
-            constraint=VerticalFieldOfViewConstraint(fov_domain.alpha_v_conservative),
+            constraint=VerticalFieldOfViewConstraint(
+                fov_domain.alpha_v_conservative
+            ),
             reference_state=desired_image,
             weight=0.25,
         ),
@@ -349,12 +424,16 @@ def build_edge_potential(
             weight=0.18,
         )
         horizontal = ConstraintBarrierPotential.from_reference(
-            HorizontalFieldOfViewConstraint(fov_domain.alpha_h_conservative),
+            HorizontalFieldOfViewConstraint(
+                fov_domain.alpha_h_conservative
+            ),
             desired_image,
             weight=0.25,
         )
         vertical = ConstraintBarrierPotential.from_reference(
-            VerticalFieldOfViewConstraint(fov_domain.alpha_v_conservative),
+            VerticalFieldOfViewConstraint(
+                fov_domain.alpha_v_conservative
+            ),
             desired_image,
             weight=0.25,
         )
@@ -381,7 +460,10 @@ def inertial_linear_velocity(
     state: np.ndarray,
 ) -> np.ndarray:
     _, quaternion, generalized_velocity = model.split_state(state)
-    return rotation_matrix_from_quaternion(quaternion) @ generalized_velocity[:3]
+    return (
+        rotation_matrix_from_quaternion(quaternion)
+        @ generalized_velocity[:3]
+    )
 
 
 def stationkeeping_wrench(
@@ -393,10 +475,15 @@ def stationkeeping_wrench(
     rotation = rotation_matrix_from_quaternion(quaternion)
     velocity_inertial = rotation @ velocity[:3]
 
-    force_inertial = -5.0 * (position - hold_position) - 4.0 * velocity_inertial
+    force_inertial = (
+        -5.0 * (position - hold_position)
+        - 4.0 * velocity_inertial
+    )
     force_body = rotation.T @ force_inertial
     torque_body = -1.5 * velocity[3:]
-    return model.drift_wrench(state) + np.concatenate((force_body, torque_body))
+    return model.drift_wrench(state) + np.concatenate(
+        (force_body, torque_body)
+    )
 
 
 def _record_images(
@@ -410,7 +497,9 @@ def _record_images(
         try:
             observation = camera.observe(
                 states[edge.observer, :3],
-                rotation_matrix_from_quaternion(states[edge.observer, 3:7]),
+                rotation_matrix_from_quaternion(
+                    states[edge.observer, 3:7]
+                ),
                 states[edge.target, :3],
             )
         except ValueError:
@@ -430,12 +519,17 @@ def _record_formation_error(
     states: np.ndarray,
 ) -> None:
     for edge in scenario.graph:
-        relative = states[edge.target, :3] - states[edge.observer, :3]
+        relative = (
+            states[edge.target, :3]
+            - states[edge.observer, :3]
+        )
         desired = scenario.desired_relative_position(
             edge.observer,
             edge.target,
         )
-        error_history[sample, edge.observer] = np.linalg.norm(relative - desired)
+        error_history[sample, edge.observer] = np.linalg.norm(
+            relative - desired
+        )
 
 
 def simulate(
@@ -458,8 +552,10 @@ def simulate(
     slack_quadratic_penalty: float,
     realism: RealismConfig | None = None,
     random_seed: int = 7,
+    scenario: FormationScenario | None = None,
 ) -> MovingFormationResult:
-    scenario = build_balanced_tree_scenario()
+    if scenario is None:
+        scenario = build_balanced_tree_scenario()
     camera = build_camera()
     distance_domain, fov_domain = build_domains()
     model = BlueROV2Model()
@@ -579,7 +675,9 @@ def simulate(
 
     follower_filters: dict[int, np.ndarray] = {}
     for edge in scenario.graph:
-        enlargement = relaxation.enlargement(relaxation_state[edge.observer])
+        enlargement = relaxation.enlargement(
+            relaxation_state[edge.observer]
+        )
         potential = build_edge_potential(
             scenario,
             camera,
@@ -591,10 +689,12 @@ def simulate(
             enlargement,
             adaptive=adaptive,
         )
-        follower_filters[edge.observer] = follower_controller.initialize_filter(
-            follower_state=states[edge.observer],
-            parent_position=states[edge.target, :3],
-            edge_potential=potential,
+        follower_filters[edge.observer] = (
+            follower_controller.initialize_filter(
+                follower_state=states[edge.observer],
+                parent_position=states[edge.target, :3],
+                edge_potential=potential,
+            )
         )
 
     plant_integrator = RK4Integrator()
@@ -701,11 +801,19 @@ def simulate(
             filter_state=leader_filter,
         )
         controller_times[step, leader] = perf_counter() - start_time
-        controls[step, leader] = controller_design.representative_thruster_forces(leader_evaluation)
+        controls[step, leader] = (
+            controller_design.representative_thruster_forces(
+                leader_evaluation
+            )
+        )
         if leader_evaluation.required_slack is not None:
-            required_slack[step, leader] = leader_evaluation.required_slack
+            required_slack[step, leader] = (
+                leader_evaluation.required_slack
+            )
         if leader_evaluation.actuation_margin is not None:
-            actuation_margin[step, leader] = leader_evaluation.actuation_margin
+            actuation_margin[step, leader] = (
+                leader_evaluation.actuation_margin
+            )
 
         leader_filter = filter_integrator.step(
             leader_controller.dynamics_controller.command_filter,
@@ -731,7 +839,9 @@ def simulate(
                     states[observer],
                     fallback_positions[observer],
                 )
-                hold_allocation = allocation.bounded_least_squares(hold_wrench)
+                hold_allocation = allocation.bounded_least_squares(
+                    hold_wrench
+                )
                 controls[step, observer] = hold_allocation.forces
                 next_states[observer] = plant_integrator.step(
                     plant_model,
@@ -790,7 +900,9 @@ def simulate(
                     )
                     relaxation_state[observer] = projected
 
-                enlargement = relaxation.enlargement(relaxation_state[observer])
+                enlargement = relaxation.enlargement(
+                    relaxation_state[observer]
+                )
                 potential = build_edge_potential(
                     scenario,
                     camera,
@@ -840,7 +952,9 @@ def simulate(
                     states[observer],
                     fallback_positions[observer],
                 )
-                hold_allocation = allocation.bounded_least_squares(hold_wrench)
+                hold_allocation = allocation.bounded_least_squares(
+                    hold_wrench
+                )
                 controls[step, observer] = hold_allocation.forces
                 next_states[observer] = plant_integrator.step(
                     plant_model,
@@ -848,11 +962,17 @@ def simulate(
                     hold_allocation.achieved_wrench,
                     dt,
                 )
-                controller_times[step, observer] = perf_counter() - start_time
+                controller_times[step, observer] = (
+                    perf_counter() - start_time
+                )
                 continue
 
             controller_times[step, observer] = perf_counter() - start_time
-            controls[step, observer] = controller_design.representative_thruster_forces(evaluation)
+            controls[step, observer] = (
+                controller_design.representative_thruster_forces(
+                    evaluation
+                )
+            )
             if evaluation.required_slack is not None:
                 required_slack[
                     step,
@@ -867,7 +987,8 @@ def simulate(
             if adaptive:
                 assert relaxation_evaluation is not None
                 next_relaxation_state[observer] = np.clip(
-                    relaxation_state[observer] + dt * relaxation_evaluation.selected_rate,
+                    relaxation_state[observer]
+                    + dt * relaxation_evaluation.selected_rate,
                     0.0,
                     1.0,
                 )
@@ -982,7 +1103,10 @@ def connection_quality_history(
         distance = np.linalg.norm(relative, axis=1)
         range_quality = np.clip(
             (result.distance_domain.d_max - distance)
-            / (result.distance_domain.d_max - result.distance_domain.d_max_conservative),
+            / (
+                result.distance_domain.d_max
+                - result.distance_domain.d_max_conservative
+            ),
             0.0,
             1.0,
         )
@@ -990,12 +1114,14 @@ def connection_quality_history(
         alpha_h = np.abs(result.image_history[:, edge.observer, 0])
         alpha_v = np.abs(result.image_history[:, edge.observer, 1])
         horizontal_quality = np.clip(
-            (1.0 - alpha_h) / (1.0 - result.fov_domain.alpha_h_conservative),
+            (1.0 - alpha_h)
+            / (1.0 - result.fov_domain.alpha_h_conservative),
             0.0,
             1.0,
         )
         vertical_quality = np.clip(
-            (1.0 - alpha_v) / (1.0 - result.fov_domain.alpha_v_conservative),
+            (1.0 - alpha_v)
+            / (1.0 - result.fov_domain.alpha_v_conservative),
             0.0,
             1.0,
         )
@@ -1027,7 +1153,11 @@ def thruster_utilization_history(
     for step in range(controls.shape[0]):
         for agent in range(result.trajectory.n_agents):
             utilization[step, agent] = float(
-                np.max(result.allocation.utilization(controls[step, agent]))
+                np.max(
+                    result.allocation.utilization(
+                        controls[step, agent]
+                    )
+                )
             )
     return utilization
 
@@ -1037,10 +1167,15 @@ def depth_maximum_history(
     values: np.ndarray,
 ) -> dict[int, np.ndarray]:
     histories: dict[int, np.ndarray] = {}
-    maximum_depth = max(scenario.graph.depth(agent) for agent in range(scenario.n_agents))
+    maximum_depth = max(
+        scenario.graph.depth(agent)
+        for agent in range(scenario.n_agents)
+    )
     for depth in range(1, maximum_depth + 1):
         agents = [
-            agent for agent in range(scenario.n_agents) if scenario.graph.depth(agent) == depth
+            agent
+            for agent in range(scenario.n_agents)
+            if scenario.graph.depth(agent) == depth
         ]
         histories[depth] = np.nanmax(values[:, agents], axis=1)
     return histories
@@ -1052,11 +1187,13 @@ def print_summary(result: MovingFormationResult, *, motion: MotionMode) -> None:
     assert trajectory.velocities is not None
 
     position_error = np.linalg.norm(
-        trajectory.positions[:, leader] - result.leader_reference_position,
+        trajectory.positions[:, leader]
+        - result.leader_reference_position,
         axis=1,
     )
     velocity_error = np.linalg.norm(
-        trajectory.velocities[:, leader] - result.leader_reference_velocity,
+        trajectory.velocities[:, leader]
+        - result.leader_reference_velocity,
         axis=1,
     )
     conservative_margin, physical_margin = sensing_margin_histories(result)
@@ -1091,12 +1228,20 @@ def print_summary(result: MovingFormationResult, *, motion: MotionMode) -> None:
         f"minimum physical {np.nanmin(physical_margin):.4g}"
     )
     print(
-        f"Adaptive enlargement: maximum normalized s {np.nanmax(result.normalized_relaxation):.3f}"
+        "Adaptive enlargement: "
+        f"maximum normalized s {np.nanmax(result.normalized_relaxation):.3f}"
     )
-    print(f"Thruster utilization: maximum {np.nanmax(utilization):.3f}")
+    print(
+        "Thruster utilization: "
+        f"maximum {np.nanmax(utilization):.3f}"
+    )
 
-    finite_required = result.required_slack[np.isfinite(result.required_slack)]
-    finite_margin = result.actuation_margin[np.isfinite(result.actuation_margin)]
+    finite_required = result.required_slack[
+        np.isfinite(result.required_slack)
+    ]
+    finite_margin = result.actuation_margin[
+        np.isfinite(result.actuation_margin)
+    ]
     if finite_required.size:
         print(
             "Actuation feasibility: "
@@ -1105,9 +1250,14 @@ def print_summary(result: MovingFormationResult, *, motion: MotionMode) -> None:
             f"{100.0 * np.mean(finite_required > 1e-10):.2f}%"
         )
     if finite_margin.size:
-        print(f"Minimum zero-slack actuation margin: {np.min(finite_margin):.4g}")
+        print(
+            "Minimum zero-slack actuation margin: "
+            f"{np.min(finite_margin):.4g}"
+        )
 
-    timing = result.controller_times[np.isfinite(result.controller_times)]
+    timing = result.controller_times[
+        np.isfinite(result.controller_times)
+    ]
     if timing.size:
         print(
             "Controller timing (all agents): "
@@ -1115,9 +1265,14 @@ def print_summary(result: MovingFormationResult, *, motion: MotionMode) -> None:
             f"max {1e3 * np.max(timing):.3f} ms"
         )
 
-    finite_fallback = result.fallback_times[np.isfinite(result.fallback_times)]
+    finite_fallback = result.fallback_times[
+        np.isfinite(result.fallback_times)
+    ]
     if finite_fallback.size:
-        print(f"Fallback: activated, first occurrence at {np.min(finite_fallback):.3f} s")
+        print(
+            "Fallback: activated, first occurrence at "
+            f"{np.min(finite_fallback):.3f} s"
+        )
     else:
         print("Fallback: no activations")
 
@@ -1149,7 +1304,10 @@ def plot_spatial_paths(
     axes.set_xlabel("x [m]")
     axes.set_ylabel("y [m]")
     axes.set_zlabel("z [m]")
-    axes.set_title("Seven-BlueROV moving formation — " + motion.replace("_", " "))
+    axes.set_title(
+        "Seven-BlueROV moving formation — "
+        + motion.replace("_", " ")
+    )
     axes.legend(ncol=2)
     figure.tight_layout()
     return figure
@@ -1160,11 +1318,13 @@ def plot_leader_tracking(result: MovingFormationResult) -> plt.Figure:
     assert result.trajectory.velocities is not None
 
     position_error = np.linalg.norm(
-        result.trajectory.positions[:, leader] - result.leader_reference_position,
+        result.trajectory.positions[:, leader]
+        - result.leader_reference_position,
         axis=1,
     )
     velocity_error = np.linalg.norm(
-        result.trajectory.velocities[:, leader] - result.leader_reference_velocity,
+        result.trajectory.velocities[:, leader]
+        - result.leader_reference_velocity,
         axis=1,
     )
 
@@ -1266,7 +1426,8 @@ def plot_thruster_utilization(result: MovingFormationResult) -> plt.Figure:
     control_times = result.trajectory.times[:-1]
 
     maximum_depth = max(
-        result.scenario.graph.depth(agent) for agent in range(result.scenario.n_agents)
+        result.scenario.graph.depth(agent)
+        for agent in range(result.scenario.n_agents)
     )
     for depth in range(maximum_depth + 1):
         agents = [
@@ -1306,11 +1467,13 @@ def save_histories(
     leader = result.scenario.graph.root
     assert result.trajectory.velocities is not None
     leader_position_error = np.linalg.norm(
-        result.trajectory.positions[:, leader] - result.leader_reference_position,
+        result.trajectory.positions[:, leader]
+        - result.leader_reference_position,
         axis=1,
     )
     leader_velocity_error = np.linalg.norm(
-        result.trajectory.velocities[:, leader] - result.leader_reference_velocity,
+        result.trajectory.velocities[:, leader]
+        - result.leader_reference_velocity,
         axis=1,
     )
 
@@ -1347,7 +1510,10 @@ def save_histories(
                 np.max(result.normalized_relaxation[sample]),
                 np.max(utilization[control_sample]),
             ]
-            row.extend(depth_histories[depth][sample] for depth in sorted(depth_histories))
+            row.extend(
+                depth_histories[depth][sample]
+                for depth in sorted(depth_histories)
+            )
             writer.writerow(row)
 
     np.savez_compressed(
@@ -1359,7 +1525,9 @@ def save_histories(
         controls=result.trajectory.controls,
         leader_reference_position=result.leader_reference_position,
         leader_reference_velocity=result.leader_reference_velocity,
-        leader_reference_acceleration=(result.leader_reference_acceleration),
+        leader_reference_acceleration=(
+            result.leader_reference_acceleration
+        ),
         formation_error_norm=result.formation_error_norm,
         normalized_relaxation=result.normalized_relaxation,
         image_history=result.image_history,
@@ -1531,7 +1699,11 @@ def main(default_motion: MotionMode) -> None:
 
     output_dir = args.output_dir
     if output_dir is None:
-        output_dir = Path("outputs") / "bluerov2_moving_formation" / motion
+        output_dir = (
+            Path("outputs")
+            / "bluerov2_moving_formation"
+            / motion
+        )
 
     apply_visualization_style(paper_quality=args.paper_quality)
 
@@ -1540,10 +1712,18 @@ def main(default_motion: MotionMode) -> None:
         realism = RealismConfig(
             parameter_variation=args.model_parameter_variation,
             water_current_inertial=tuple(args.water_current),
-            relative_position_noise_std=(args.relative_position_noise_std),
-            linear_velocity_noise_std=(args.linear_velocity_noise_std),
-            angular_velocity_noise_std=(args.angular_velocity_noise_std),
-            relative_measurement_delay=(args.relative_measurement_delay),
+            relative_position_noise_std=(
+                args.relative_position_noise_std
+            ),
+            linear_velocity_noise_std=(
+                args.linear_velocity_noise_std
+            ),
+            angular_velocity_noise_std=(
+                args.angular_velocity_noise_std
+            ),
+            relative_measurement_delay=(
+                args.relative_measurement_delay
+            ),
         )
 
     result = simulate(
@@ -1560,7 +1740,9 @@ def main(default_motion: MotionMode) -> None:
         virtual_linear_speed_limit=args.virtual_linear_speed_limit,
         virtual_angular_speed_limit=args.virtual_angular_speed_limit,
         relaxation_recovery_gain=args.relaxation_recovery_gain,
-        relaxation_domain_margin_ratio=(args.relaxation_domain_margin_ratio),
+        relaxation_domain_margin_ratio=(
+            args.relaxation_domain_margin_ratio
+        ),
         slack_linear_penalty=args.slack_linear_penalty,
         slack_quadratic_penalty=args.slack_quadratic_penalty,
         realism=realism,
@@ -1572,7 +1754,9 @@ def main(default_motion: MotionMode) -> None:
         "spatial_paths": plot_spatial_paths(result, motion=motion),
         "leader_tracking": plot_leader_tracking(result),
         "formation_error_by_depth": plot_formation_error_by_depth(result),
-        "adaptive_enlargement_by_depth": (plot_adaptive_enlargement_by_depth(result)),
+        "adaptive_enlargement_by_depth": (
+            plot_adaptive_enlargement_by_depth(result)
+        ),
         "sensing_margins": plot_sensing_margins(result),
         "thruster_utilization": plot_thruster_utilization(result),
     }
@@ -1599,7 +1783,10 @@ def main(default_motion: MotionMode) -> None:
             show_body_forward=False,
             trail_length=500,
             frame_stride=args.frame_stride,
-            title=("Seven-BlueROV moving formation — " + motion.replace("_", " ")),
+            title=(
+                "Seven-BlueROV moving formation — "
+                + motion.replace("_", " ")
+            ),
         )
 
     if args.save or args.save_animation:
@@ -1607,9 +1794,7 @@ def main(default_motion: MotionMode) -> None:
         figure_format = (
             args.figure_format
             if args.figure_format is not None
-            else "pdf"
-            if args.paper_quality
-            else "png"
+            else "pdf" if args.paper_quality else "png"
         )
         if args.save:
             for name, figure in figures.items():

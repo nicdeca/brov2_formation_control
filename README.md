@@ -20,7 +20,7 @@ The project combines:
        width="850">
 </p>
 
-The animation above is generated from the seven-robot trajectory validation example. See [Generating the README animation](#generating-the-readme-animation).
+The animation above is generated from a dedicated seven-robot formation-acquisition demo: the leader remains stationary while the followers start from an asymmetric configuration and converge to the desired directed-tree formation. See [Generating the README animation](#generating-the-readme-animation).
 
 ## Overview
 
@@ -216,6 +216,17 @@ The default simulation duration is 200 s.
 
 The example reports performance separately by tree depth, which makes it possible to inspect propagation of tracking error through the directed cascade.
 
+### README demo — Formation acquisition from displaced initial conditions
+
+For the repository animation, the leader is kept stationary and the six followers start from a deliberately asymmetric configuration away from the desired formation:
+
+```bash
+uv run python examples/09_bluerov2_readme_formation_demo.py \
+    --no-show
+```
+
+The example is intentionally short and uses tight spatial motion so that the BlueROV2 geometry and sensing links remain clearly visible throughout the animation. It is a visual demonstration of formation acquisition rather than a replacement for the longer validation cases.
+
 ### 07 — Realistic trajectory validation
 
 This example adds simulation-only realism without modifying the controller:
@@ -282,7 +293,7 @@ This gives a two-level cascade and makes it possible to compare formation perfor
 
 ## Generating the README animation
 
-The README uses a GIF generated directly from the realistic seven-robot trajectory simulation.
+The README uses a dedicated GIF in which the leader remains stationary and the followers acquire the desired formation from visibly displaced initial conditions.
 
 Run:
 
@@ -293,13 +304,11 @@ bash scripts/generate_readme_animation.sh
 which executes the equivalent of
 
 ```bash
-uv run python examples/07_bluerov2_realistic_trajectory_validation.py \
-    --control-space thruster \
-    --adaptive \
-    --save-animation \
+uv run python examples/09_bluerov2_readme_formation_demo.py \
+    --duration 30 \
+    --frame-stride 5 \
     --animation-format gif \
-    --frame-stride 20 \
-    --output-dir docs/media \
+    --output docs/media/formation_animation.gif \
     --no-show
 ```
 
@@ -311,15 +320,13 @@ docs/media/formation_animation.gif
 
 The image link at the top of this README will then render automatically on GitHub.
 
-For a faster development preview, you can shorten the run:
+For a quicker preview, reduce the duration, for example:
 
 ```bash
-uv run python examples/07_bluerov2_realistic_trajectory_validation.py \
-    --duration 60 \
-    --save-animation \
-    --animation-format gif \
-    --frame-stride 20 \
-    --output-dir docs/media \
+uv run python examples/09_bluerov2_readme_formation_demo.py \
+    --duration 15 \
+    --frame-stride 4 \
+    --output docs/media/formation_animation.gif \
     --no-show
 ```
 

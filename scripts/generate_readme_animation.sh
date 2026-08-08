@@ -3,13 +3,11 @@ set -euo pipefail
 
 mkdir -p docs/media
 
-uv run python examples/07_bluerov2_realistic_trajectory_validation.py \
-    --control-space thruster \
-    --adaptive \
-    --save-animation \
+uv run python examples/09_bluerov2_readme_formation_demo.py \
+    --duration 30 \
+    --frame-stride 5 \
     --animation-format gif \
-    --frame-stride 20 \
-    --output-dir docs/media \
+    --output docs/media/formation_animation.gif \
     --no-show
 
 echo
