@@ -146,6 +146,7 @@ class CLFDiagnosticHistory:
     generalized_velocity: np.ndarray
     filtered_velocity: np.ndarray
     desired_velocity: np.ndarray
+    unlimited_desired_velocity: np.ndarray
     filtered_velocity_derivative: np.ndarray
     dynamics_bias: np.ndarray
     best_actuator_contribution: np.ndarray
@@ -319,6 +320,8 @@ def build_agent_controller(
     control_space: BlueROV2ControlSpace,
     slack_linear_penalty: float,
     slack_quadratic_penalty: float,
+    virtual_linear_speed_limit: float,
+    virtual_angular_speed_limit: float,
 ) -> BlueROV2ControllerDesign:
     """Build the physical CLF-QP controller.
 
@@ -332,6 +335,13 @@ def build_agent_controller(
         control_space=control_space,
         slack_linear_penalty=slack_linear_penalty,
         slack_penalty=slack_quadratic_penalty,
+        virtual_velocity_norm_limits=np.array(
+            [
+                virtual_linear_speed_limit,
+                virtual_angular_speed_limit,
+            ],
+            dtype=float,
+        ),
     )
 
 
@@ -574,6 +584,8 @@ def simulate(
     stress_scale: float = 1.0,
     slack_linear_penalty: float = 100.0,
     slack_quadratic_penalty: float = 5e3,
+    virtual_linear_speed_limit: float = 1.5,
+    virtual_angular_speed_limit: float = 2.0,
     relaxation_recovery_gain: float = 0.8,
     relaxation_domain_margin_ratio: float = 0.1,
 ) -> tuple[
@@ -608,6 +620,8 @@ def simulate(
         control_space=control_space,
         slack_linear_penalty=slack_linear_penalty,
         slack_quadratic_penalty=slack_quadratic_penalty,
+        virtual_linear_speed_limit=virtual_linear_speed_limit,
+        virtual_angular_speed_limit=virtual_angular_speed_limit,
     )
     controller = controller_design.agent_controller
 
@@ -788,6 +802,10 @@ def simulate(
         np.nan,
     )
     clf_desired_velocities = np.full(
+        (steps, scenario.n_agents, 6),
+        np.nan,
+    )
+    clf_unlimited_desired_velocities = np.full(
         (steps, scenario.n_agents, 6),
         np.nan,
     )
@@ -1098,6 +1116,7 @@ def simulate(
             filtered_velocity = evaluation.controller.filter.output
             filtered_velocity_derivative = evaluation.controller.filter.output_derivative
             desired_velocity = evaluation.controller.desired_velocity
+            unlimited_desired_velocity = evaluation.controller.unlimited_desired_velocity
             velocity_error = clf.velocity_error
             command_acceleration_wrench = model.mass_matrix @ filtered_velocity_derivative
 
@@ -1169,6 +1188,7 @@ def simulate(
             clf_generalized_velocities[step, observer] = generalized_velocity
             clf_filtered_velocities[step, observer] = filtered_velocity
             clf_desired_velocities[step, observer] = desired_velocity
+            clf_unlimited_desired_velocities[step, observer] = unlimited_desired_velocity
             clf_filtered_velocity_derivatives[step, observer] = filtered_velocity_derivative
             clf_dynamics_biases[step, observer] = dynamics_bias
             clf_best_actuator_contributions[step, observer] = best_actuator_contribution
@@ -1253,6 +1273,7 @@ def simulate(
             generalized_velocity=clf_generalized_velocities,
             filtered_velocity=clf_filtered_velocities,
             desired_velocity=clf_desired_velocities,
+            unlimited_desired_velocity=(clf_unlimited_desired_velocities),
             filtered_velocity_derivative=(clf_filtered_velocity_derivatives),
             dynamics_bias=clf_dynamics_biases,
             best_actuator_contribution=(clf_best_actuator_contributions),
@@ -2124,6 +2145,12 @@ def save_clf_diagnostics_csv(
                 "nu_d_wx",
                 "nu_d_wy",
                 "nu_d_wz",
+                "nu_d_raw_vx",
+                "nu_d_raw_vy",
+                "nu_d_raw_vz",
+                "nu_d_raw_wx",
+                "nu_d_raw_wy",
+                "nu_d_raw_wz",
                 "nu_c_dot_vx",
                 "nu_c_dot_vy",
                 "nu_c_dot_vz",
@@ -2170,6 +2197,7 @@ def save_clf_diagnostics_csv(
                         *diagnostics.generalized_velocity[step, observer].tolist(),
                         *diagnostics.filtered_velocity[step, observer].tolist(),
                         *diagnostics.desired_velocity[step, observer].tolist(),
+                        *diagnostics.unlimited_desired_velocity[step, observer].tolist(),
                         *diagnostics.filtered_velocity_derivative[step, observer].tolist(),
                         *diagnostics.dynamics_bias[step, observer].tolist(),
                         diagnostics.best_actuator_contribution[step, observer],
@@ -2264,6 +2292,11 @@ def print_peak_clf_diagnostic(
         + "\n    nu_c  = "
         + np.array2string(
             diagnostics.filtered_velocity[step, observer],
+            **array_options,
+        )
+        + "\n    nu_d,raw = "
+        + np.array2string(
+            diagnostics.unlimited_desired_velocity[step, observer],
             **array_options,
         )
         + "\n    nu_d  = "
@@ -2500,6 +2533,8 @@ def run_thrust_authority_sweep(
     adaptive: bool,
     stress_test: bool,
     stress_scale: float,
+    virtual_linear_speed_limit: float,
+    virtual_angular_speed_limit: float,
     relaxation_recovery_gain: float,
     relaxation_domain_margin_ratio: float,
     slack_linear_penalty: float,
@@ -2547,6 +2582,8 @@ def run_thrust_authority_sweep(
             stress_scale=stress_scale,
             slack_linear_penalty=slack_linear_penalty,
             slack_quadratic_penalty=slack_quadratic_penalty,
+            virtual_linear_speed_limit=virtual_linear_speed_limit,
+            virtual_angular_speed_limit=virtual_angular_speed_limit,
             relaxation_recovery_gain=relaxation_recovery_gain,
             relaxation_domain_margin_ratio=(relaxation_domain_margin_ratio),
         )
@@ -2738,6 +2775,24 @@ def main() -> None:
         help=("quadratic slack penalty p2 in p1*delta + 0.5*p2*delta^2"),
     )
     parser.add_argument(
+        "--virtual-linear-speed-limit",
+        type=float,
+        default=1.5,
+        help=(
+            "smooth norm limit [m/s] on the translational part of the "
+            "virtual gradient-descent correction"
+        ),
+    )
+    parser.add_argument(
+        "--virtual-angular-speed-limit",
+        type=float,
+        default=2.0,
+        help=(
+            "smooth norm limit [rad/s] on the rotational part of the "
+            "virtual gradient-descent correction"
+        ),
+    )
+    parser.add_argument(
         "--relaxation-recovery-gain",
         type=float,
         default=0.8,
@@ -2833,6 +2888,8 @@ def main() -> None:
             adaptive=args.adaptive,
             stress_test=args.stress_test,
             stress_scale=args.stress_scale,
+            virtual_linear_speed_limit=args.virtual_linear_speed_limit,
+            virtual_angular_speed_limit=args.virtual_angular_speed_limit,
             relaxation_recovery_gain=(args.relaxation_recovery_gain),
             relaxation_domain_margin_ratio=(args.relaxation_domain_margin_ratio),
             slack_linear_penalty=args.slack_linear_penalty,
@@ -2890,6 +2947,8 @@ def main() -> None:
         stress_scale=args.stress_scale,
         slack_linear_penalty=args.slack_linear_penalty,
         slack_quadratic_penalty=args.slack_quadratic_penalty,
+        virtual_linear_speed_limit=args.virtual_linear_speed_limit,
+        virtual_angular_speed_limit=args.virtual_angular_speed_limit,
         relaxation_recovery_gain=args.relaxation_recovery_gain,
         relaxation_domain_margin_ratio=(args.relaxation_domain_margin_ratio),
     )

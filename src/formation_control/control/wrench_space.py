@@ -147,6 +147,8 @@ def build_wrench_space_controller(
     control_weight: FloatArray,
     slack_penalty: float,
     alpha: ClassKFunction,
+    virtual_velocity_norm_limits: FloatArray | None = None,
+    virtual_velocity_group_sizes: tuple[int, ...] | None = None,
     slack_linear_penalty: float = 0.0,
     solver: str = "osqp",
 ) -> WrenchSpaceControllerDesign:
@@ -158,6 +160,8 @@ def build_wrench_space_controller(
             inertia=np.asarray(inertia, dtype=float),
             input_matrix=np.eye(6),
         ),
+        virtual_velocity_norm_limits=virtual_velocity_norm_limits,
+        virtual_velocity_group_sizes=virtual_velocity_group_sizes,
         qp=CLFQP(
             control_weight=np.asarray(control_weight, dtype=float),
             slack_penalty=slack_penalty,

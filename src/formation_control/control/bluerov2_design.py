@@ -39,6 +39,11 @@ def _default_filter_bandwidth() -> FloatArray:
     return np.array([3.0, 3.0, 3.0, 4.0, 4.0, 4.0])
 
 
+def _default_virtual_velocity_norm_limits() -> FloatArray:
+    # Independent norm limits for translational and rotational corrections.
+    return np.array([1.5, 2.0])
+
+
 @dataclass(frozen=True)
 class BlueROV2ControllerDesign:
     """Controller plus common actuation data for one control-coordinate choice."""
@@ -98,6 +103,7 @@ def build_bluerov2_controller_design(
     *,
     control_space: BlueROV2ControlSpace = "thruster",
     virtual_gain: FloatArray | None = None,
+    virtual_velocity_norm_limits: FloatArray | None = None,
     filter_bandwidth: float | FloatArray | None = None,
     slack_penalty: float = 5e3,
     slack_linear_penalty: float = 100.0,
@@ -109,6 +115,8 @@ def build_bluerov2_controller_design(
 
     if virtual_gain is None:
         virtual_gain = _default_virtual_gain()
+    if virtual_velocity_norm_limits is None:
+        virtual_velocity_norm_limits = _default_virtual_velocity_norm_limits()
     if filter_bandwidth is None:
         filter_bandwidth = _default_filter_bandwidth()
 
@@ -138,6 +146,11 @@ def build_bluerov2_controller_design(
         dynamics_controller = SecondOrderCLFQPController(
             virtual_gain=np.asarray(virtual_gain, dtype=float),
             command_filter=command_filter,
+            virtual_velocity_norm_limits=np.asarray(
+                virtual_velocity_norm_limits,
+                dtype=float,
+            ),
+            virtual_velocity_group_sizes=(3, 3),
             clf=BacksteppingCLF(
                 model.mass_matrix,
                 input_matrix=allocation.matrix,
@@ -158,6 +171,11 @@ def build_bluerov2_controller_design(
             inertia=model.mass_matrix,
             virtual_gain=np.asarray(virtual_gain, dtype=float),
             command_filter=command_filter,
+            virtual_velocity_norm_limits=np.asarray(
+                virtual_velocity_norm_limits,
+                dtype=float,
+            ),
+            virtual_velocity_group_sizes=(3, 3),
             polytope=wrench_polytope,
             control_weight=wrench_weight,
             slack_penalty=slack_penalty,

@@ -34,3 +34,19 @@ def test_physical_controller_retains_linear_slack_penalty():
     )
 
     assert design.agent_controller.dynamics_controller.qp.slack_linear_penalty == 123.0
+
+
+def test_bluerov2_design_uses_smooth_virtual_twist_norm_limits_by_default():
+    model = BlueROV2Model()
+    allocation = BlueROV2HeavyThrusterAllocation.default_45deg()
+
+    design = build_bluerov2_controller_design(
+        model,
+        allocation,
+        control_space="thruster",
+    )
+
+    np.testing.assert_allclose(
+        design.agent_controller.dynamics_controller.virtual_velocity_norm_limits,
+        np.array([1.5, 2.0]),
+    )
