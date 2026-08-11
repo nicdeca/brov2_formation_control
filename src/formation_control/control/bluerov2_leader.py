@@ -159,7 +159,9 @@ class BlueROV2LeaderController:
 
     def __post_init__(self) -> None:
         if self.dynamics_controller.velocity_dim != 6:
-            raise ValueError("BlueROV2 leader control requires a 6-D velocity controller.")
+            raise ValueError(
+                "BlueROV2 leader control requires a 6-D velocity controller."
+            )
         if not np.allclose(
             self.dynamics_controller.clf.inertia,
             self.model.mass_matrix,
@@ -219,11 +221,15 @@ class BlueROV2LeaderController:
 
         position_error = position - reference.position
         position_gradient_inertial = self.position_gain @ position_error
-        position_value = 0.5 * float(position_error @ self.position_gain @ position_error)
+        position_value = 0.5 * float(
+            position_error @ self.position_gain @ position_error
+        )
 
         relative_rotation = self.desired_rotation.T @ rotation
         attitude_error = 0.5 * _vee(relative_rotation - relative_rotation.T)
-        attitude_value = 0.5 * self.attitude_gain * float(np.trace(np.eye(3) - relative_rotation))
+        attitude_trace_error = float(np.trace(np.eye(3) - relative_rotation))
+        attitude_trace_error = float(np.clip(attitude_trace_error, 0.0, 4.0))
+        attitude_value = 0.5 * self.attitude_gain * attitude_trace_error
         attitude_gradient_body = self.attitude_gain * attitude_error
 
         generalized_gradient = np.concatenate(
@@ -234,9 +240,12 @@ class BlueROV2LeaderController:
         )
 
         linear_feedforward_body = rotation.T @ reference.velocity
-        linear_feedforward_derivative_body = rotation.T @ reference.acceleration - np.cross(
-            angular_velocity,
-            linear_feedforward_body,
+        linear_feedforward_derivative_body = (
+            rotation.T @ reference.acceleration
+            - np.cross(
+                angular_velocity,
+                linear_feedforward_body,
+            )
         )
 
         feedforward_velocity_body = np.concatenate(
