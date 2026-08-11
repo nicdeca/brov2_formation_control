@@ -1,0 +1,30 @@
+/**:
+  ros__parameters:
+    dt: 0.02
+    measurement_timeout: 0.25
+
+    # Current BlueROV SITL source: px4_msgs/VehicleOdometry.
+    # Its pose_frame and velocity_frame are checked at runtime.
+    state_source: px4
+
+    # Used only when state_source == nav_msgs.
+    mocap_world_frame: core_nwu
+    odom_twist_frame: body
+
+    # Optimize directly over the 8 individual thruster forces.
+    # The equivalent body wrench B f is then sent to PX4.
+    control_space: thruster
+    thruster_voltage: 16
+    thrust_derating: 1.0
+
+    virtual_linear_speed_limit: 1.5
+    virtual_angular_speed_limit: 2.0
+    alpha_gain: 0.8
+    slack_linear_penalty: 100.0
+    slack_quadratic_penalty: 5000.0
+
+    # PX4 interface normalization inherited from previous ROS 2 workspace.
+    px4_force_max: [88.0, 88.0, 137.0]
+    px4_torque_max: [30.0, 16.5, 21.0]
+    px4_thrust_command_limit: 0.10
+    px4_torque_command_limit: 0.10

@@ -1,0 +1,400 @@
+"""ROS 2 leader node using the same CLF-QP dynamics controller."""
+
+from __future__ import annotations
+
+import numpy as np
+import rclpy
+from geometry_msgs.msg import TwistStamped
+from nav_msgs.msg import Odometry
+from px4_msgs.msg import VehicleOdometry
+from rclpy.node import Node
+from trajectory_msgs.msg import MultiDOFJointTrajectoryPoint
+
+from formation_control.control.bluerov2_leader import LeaderTrajectorySample
+from formation_control.geometry import rotation_matrix_from_quaternion
+
+from .core_runtime import LeaderCoreRuntime
+from .diagnostics import DiagnosticsPublisher
+from .node_helpers import (
+    controller_config_from_parameters,
+    declare_common_parameters,
+    frame_convention_from_parameters,
+    px4_normalization_from_parameters,
+)
+from .px4_interface import PX4WrenchInterface, px4_qos_profile
+from .reference_runtime import VelocityCommandReference
+from .snapshot_publisher import DiagnosticSnapshotPublisher
+from .state_adapter import (
+    odometry_to_core_state,
+    px4_vehicle_odometry_to_core_state,
+)
+
+
+class LeaderControllerNode(Node):
+    """Leader accepting stationary, velocity, or full p/v/a references."""
+
+    def __init__(self) -> None:
+        super().__init__("formation_leader_controller")
+        declare_common_parameters(self)
+
+        self.declare_parameter("reference_mode", "stationary")
+        self.declare_parameter("odometry_topic", "")
+        self.declare_parameter(
+            "velocity_command_topic",
+            "formation_control/velocity_command",
+        )
+        self.declare_parameter(
+            "trajectory_point_topic",
+            "formation_control/trajectory_point",
+        )
+        self.declare_parameter("velocity_command_bandwidth", 0.2)
+        self.declare_parameter("position_gain", 1.0)
+        self.declare_parameter("attitude_gain", 1.0)
+
+        self.robot_name = str(self.get_parameter("robot_name").value)
+        self.state_source = str(
+            self.get_parameter("state_source").value
+        )
+        if self.state_source not in ("px4", "nav_msgs"):
+            raise ValueError(
+                "state_source must be 'px4' or 'nav_msgs'."
+            )
+        self.odometry_topic = str(
+            self.get_parameter("odometry_topic").value
+        )
+        if not self.odometry_topic:
+            self.odometry_topic = (
+                f"/{self.robot_name}/fmu/out/vehicle_odometry"
+                if self.state_source == "px4"
+                else f"/mocap/{self.robot_name.lower()}/odom"
+            )
+
+        self.dt = float(self.get_parameter("dt").value)
+        self.measurement_timeout = float(
+            self.get_parameter("measurement_timeout").value
+        )
+        self.dry_run = bool(self.get_parameter("dry_run").value)
+        self.reference_mode = str(
+            self.get_parameter("reference_mode").value
+        )
+        if self.reference_mode not in (
+            "stationary",
+            "velocity",
+            "trajectory",
+        ):
+            raise ValueError(
+                "reference_mode must be stationary, velocity, or trajectory."
+            )
+
+        self.frames = frame_convention_from_parameters(self)
+        self.runtime = LeaderCoreRuntime(
+            controller_config_from_parameters(self),
+            position_gain=float(
+                self.get_parameter("position_gain").value
+            ),
+            attitude_gain=float(
+                self.get_parameter("attitude_gain").value
+            ),
+        )
+        self.px4 = PX4WrenchInterface(
+            self,
+            robot_name=self.robot_name,
+            frames=self.frames,
+            normalization=px4_normalization_from_parameters(self),
+        )
+        self.diagnostics = DiagnosticsPublisher(self)
+        self.snapshot_publisher = DiagnosticSnapshotPublisher(self)
+
+        self._state: np.ndarray | None = None
+        self._state_receipt = -np.inf
+        self._stationary_reference: LeaderTrajectorySample | None = None
+
+        self._velocity_command = np.zeros(3)
+        self._velocity_reference: VelocityCommandReference | None = None
+
+        self._trajectory_reference: LeaderTrajectorySample | None = None
+        self._trajectory_receipt = -np.inf
+
+        if self.state_source == "px4":
+            self.create_subscription(
+                VehicleOdometry,
+                self.odometry_topic,
+                self._px4_odom_callback,
+                px4_qos_profile(),
+            )
+        else:
+            self.create_subscription(
+                Odometry,
+                self.odometry_topic,
+                self._odom_callback,
+                10,
+            )
+
+        if self.reference_mode == "velocity":
+            topic = str(
+                self.get_parameter("velocity_command_topic").value
+            )
+            self.create_subscription(
+                TwistStamped,
+                topic,
+                self._velocity_command_callback,
+                10,
+            )
+        elif self.reference_mode == "trajectory":
+            topic = str(
+                self.get_parameter("trajectory_point_topic").value
+            )
+            self.create_subscription(
+                MultiDOFJointTrajectoryPoint,
+                topic,
+                self._trajectory_point_callback,
+                10,
+            )
+
+        self.create_timer(self.dt, self._control_step)
+
+        self.get_logger().info(
+            "ROS 2 leader controller configured:\n"
+            f"  robot: {self.robot_name}\n"
+            f"  reference mode: {self.reference_mode}\n"
+            f"  state source: {self.state_source}\n"
+            f"  odometry topic: {self.odometry_topic}\n"
+            f"  generic-odom world frame: {self.frames.world_frame}\n"
+            f"  odom twist frame: {self.frames.twist_frame}\n"
+            f"  dry run: {self.dry_run}"
+        )
+
+    def _now_seconds(self) -> float:
+        return 1e-9 * float(self.get_clock().now().nanoseconds)
+
+    def _px4_odom_callback(
+        self,
+        message: VehicleOdometry,
+    ) -> None:
+        try:
+            state = px4_vehicle_odometry_to_core_state(message)
+        except ValueError as error:
+            self.get_logger().error(
+                f"Invalid VehicleOdometry frame: {error}",
+                throttle_duration_sec=2.0,
+            )
+            return
+        self._accept_state(state)
+
+    def _odom_callback(self, message: Odometry) -> None:
+        self._accept_state(
+            odometry_to_core_state(message, self.frames)
+        )
+
+    def _accept_state(self, state: np.ndarray) -> None:
+        self._state = state
+        self._state_receipt = self._now_seconds()
+
+        if self._stationary_reference is None:
+            self._stationary_reference = LeaderTrajectorySample(
+                position=self._state[:3].copy(),
+                velocity=np.zeros(3),
+                acceleration=np.zeros(3),
+            )
+
+        if (
+            self.reference_mode == "velocity"
+            and self._velocity_reference is None
+        ):
+            rotation = rotation_matrix_from_quaternion(
+                self._state[3:7]
+            )
+            inertial_velocity = rotation @ self._state[7:10]
+            self._velocity_reference = (
+                VelocityCommandReference.initialize(
+                    self._state[:3],
+                    inertial_velocity,
+                    float(
+                        self.get_parameter(
+                            "velocity_command_bandwidth"
+                        ).value
+                    ),
+                )
+            )
+
+    def _velocity_command_callback(
+        self,
+        message: TwistStamped,
+    ) -> None:
+        incoming_world = np.array(
+            [
+                message.twist.linear.x,
+                message.twist.linear.y,
+                message.twist.linear.z,
+            ],
+            dtype=float,
+        )
+        self._velocity_command = self.frames.world_vector_to_core(
+            incoming_world
+        )
+
+    def _trajectory_point_callback(
+        self,
+        message: MultiDOFJointTrajectoryPoint,
+    ) -> None:
+        if not message.transforms:
+            self.get_logger().error(
+                "Trajectory point has no transform."
+            )
+            return
+        if not message.velocities:
+            self.get_logger().error(
+                "Trajectory point has no velocity."
+            )
+            return
+        if not message.accelerations:
+            self.get_logger().error(
+                "Trajectory point has no acceleration."
+            )
+            return
+
+        transform = message.transforms[0]
+        velocity = message.velocities[0]
+        acceleration = message.accelerations[0]
+
+        position = self.frames.world_position_to_core(
+            np.array(
+                [
+                    transform.translation.x,
+                    transform.translation.y,
+                    transform.translation.z,
+                ]
+            )
+        )
+        linear_velocity = self.frames.world_vector_to_core(
+            np.array(
+                [
+                    velocity.linear.x,
+                    velocity.linear.y,
+                    velocity.linear.z,
+                ]
+            )
+        )
+        linear_acceleration = self.frames.world_vector_to_core(
+            np.array(
+                [
+                    acceleration.linear.x,
+                    acceleration.linear.y,
+                    acceleration.linear.z,
+                ]
+            )
+        )
+
+        self._trajectory_reference = LeaderTrajectorySample(
+            position=position,
+            velocity=linear_velocity,
+            acceleration=linear_acceleration,
+        )
+        self._trajectory_receipt = self._now_seconds()
+
+    def _state_fresh(self) -> bool:
+        return (
+            self._state is not None
+            and self._now_seconds() - self._state_receipt
+            <= self.measurement_timeout
+        )
+
+    def _reference(self) -> LeaderTrajectorySample | None:
+        if self.reference_mode == "stationary":
+            return self._stationary_reference
+
+        if self.reference_mode == "velocity":
+            if self._velocity_reference is None:
+                return None
+            return self._velocity_reference.sample(
+                self._velocity_command
+            )
+
+        if self._trajectory_reference is None:
+            return None
+        if (
+            self._now_seconds() - self._trajectory_receipt
+            > self.measurement_timeout
+        ):
+            return None
+        return self._trajectory_reference
+
+    def _control_step(self) -> None:
+        if not self.px4.enabled and not self.dry_run:
+            return
+
+        if not self._state_fresh():
+            self.get_logger().warn(
+                "Waiting for fresh leader odometry.",
+                throttle_duration_sec=2.0,
+            )
+            if not self.dry_run:
+                self.px4.publish_zero()
+            self.diagnostics.publish_fallback()
+            self.snapshot_publisher.publish_fallback(role=1.0)
+            return
+
+        reference = self._reference()
+        if reference is None:
+            self.get_logger().warn(
+                "Waiting for leader reference.",
+                throttle_duration_sec=2.0,
+            )
+            if not self.dry_run:
+                self.px4.publish_zero()
+            self.diagnostics.publish_fallback()
+            self.snapshot_publisher.publish_fallback(role=1.0)
+            return
+
+        assert self._state is not None
+        try:
+            result = self.runtime.step(
+                self._state,
+                reference,
+                dt=self.dt,
+            )
+        except Exception as error:
+            self.get_logger().error(
+                f"Leader core evaluation failed: {error}",
+                throttle_duration_sec=1.0,
+            )
+            if not self.dry_run:
+                self.px4.publish_zero()
+            self.diagnostics.publish_fallback()
+            self.snapshot_publisher.publish_fallback(role=1.0)
+            return
+
+        if not self.dry_run:
+            self.px4.publish_core_wrench(result.wrench_body)
+        self.diagnostics.publish(
+            result.diagnostics,
+            fallback=False,
+        )
+        if result.snapshot is not None:
+            self.snapshot_publisher.publish(result.snapshot)
+
+        if (
+            self.reference_mode == "velocity"
+            and self._velocity_reference is not None
+        ):
+            self._velocity_reference.advance(
+                self._velocity_command,
+                self.dt,
+            )
+
+
+def main(args=None) -> None:
+    rclpy.init(args=args)
+    node = LeaderControllerNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.px4.publish_zero()
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()

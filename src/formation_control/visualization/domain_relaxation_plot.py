@@ -234,3 +234,93 @@ def plot_fov_domain_relaxation(
     figure.tight_layout()
 
     return figure, (domain_axes, relaxation_axes)
+
+
+def plot_vertical_fov_relaxation_from_histories(
+    times: FloatArray,
+    image_history: FloatArray,
+    relaxation_state_history: FloatArray,
+    *,
+    observer: int,
+    alpha_conservative: float,
+    alpha_physical: float = 1.0,
+    domain_margin_ratio: float = 0.1,
+    paper_quality: bool = True,
+) -> tuple[Figure, tuple[Axes, Axes]]:
+    """Plot the logged vertical-FoV adaptive relaxation history.
+
+    This is a compatibility adapter for experiment histories, which store the
+    normalized relaxation state ``s`` rather than the dimensional enlargement
+    ``rho`` expected by :func:`plot_fov_domain_relaxation`.
+
+    History channel conventions are
+
+    ``image_history[..., :] = [alpha_h, alpha_v]``
+
+    and
+
+    ``relaxation_state_history[..., :] =
+    [s_collision, s_range, s_horizontal_fov, s_vertical_fov]``.
+    """
+    image_history = np.asarray(image_history, dtype=float)
+    relaxation_state_history = np.asarray(
+        relaxation_state_history,
+        dtype=float,
+    )
+
+    if image_history.ndim != 3 or image_history.shape[2] < 2:
+        raise ValueError(
+            "image_history must have shape (n_samples, n_agents, >=2)."
+        )
+    if (
+        relaxation_state_history.ndim != 3
+        or relaxation_state_history.shape[2] < 4
+    ):
+        raise ValueError(
+            "relaxation_state_history must have shape "
+            "(n_samples, n_agents, >=4)."
+        )
+    if image_history.shape[:2] != relaxation_state_history.shape[:2]:
+        raise ValueError(
+            "image_history and relaxation_state_history must have matching "
+            "sample and agent dimensions."
+        )
+    if not 0 <= observer < image_history.shape[1]:
+        raise ValueError(
+            f"observer index {observer} is outside the logged agent range."
+        )
+    if not np.isclose(alpha_physical, 1.0):
+        raise ValueError(
+            "The current normalized FoV plot assumes alpha_physical=1."
+        )
+
+    alpha_v = image_history[:, observer, 1]
+    s_v = relaxation_state_history[:, observer, 3]
+
+    if not np.all(np.isfinite(s_v)):
+        raise ValueError(
+            "vertical-FoV relaxation history must contain only finite values."
+        )
+    if np.any(s_v < -1e-10) or np.any(s_v > 1.0 + 1e-10):
+        raise ValueError(
+            "normalized vertical-FoV relaxation must lie in [0, 1]."
+        )
+
+    maximum_enlargement = alpha_physical**2 - alpha_conservative**2
+    enlargement = np.clip(s_v, 0.0, 1.0) * maximum_enlargement
+
+    # Styling remains owned by the existing project visualization stack.
+    # ``paper_quality`` is accepted because the experiment plotting adapter
+    # uses that common interface.
+    _ = paper_quality
+
+    return plot_fov_domain_relaxation(
+        times,
+        alpha_v,
+        enlargement,
+        alpha_conservative=alpha_conservative,
+        maximum_enlargement=maximum_enlargement,
+        domain_margin_ratio=domain_margin_ratio,
+        channel_symbol=r"\alpha_v",
+    )
+
