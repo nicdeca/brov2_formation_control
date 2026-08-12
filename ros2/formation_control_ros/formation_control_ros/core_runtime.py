@@ -179,10 +179,10 @@ class FollowerCoreRuntime:
             vertical_half_angle=task_config.vertical_half_angle_deg,
         )
 
-        desired_relative = np.asarray(
-            task_config.desired_relative_position,
-            dtype=float,
+        self._desired_relative_position = self._validate_desired_relative_position(
+            task_config.desired_relative_position
         )
+        desired_relative = self._desired_relative_position
         desired_image = NormalizedImagePoint(0.0, 0.0)
         self._templates = _AdaptiveTemplates(
             collision=AdaptiveConstraintBarrierPotential(
@@ -242,12 +242,79 @@ class FollowerCoreRuntime:
     def relaxation_state(self) -> np.ndarray:
         return self._relaxation_state.copy()
 
+    @property
+    def desired_relative_position(self) -> np.ndarray:
+        """Current parent-minus-follower formation reference in core NWU."""
+        return self._desired_relative_position.copy()
+
+    def _validate_desired_relative_position(
+        self,
+        desired_relative_position,
+    ) -> np.ndarray:
+        desired = np.asarray(desired_relative_position, dtype=float).reshape(-1)
+        if desired.shape != (3,):
+            raise ValueError(
+                "desired_relative_position must contain exactly three values."
+            )
+        if not np.all(np.isfinite(desired)):
+            raise ValueError(
+                "desired_relative_position must contain only finite values."
+            )
+
+        distance = float(np.linalg.norm(desired))
+        if not (
+            self.distance_domain.d_min_conservative
+            < distance
+            < self.distance_domain.d_max_conservative
+        ):
+            raise ValueError(
+                "desired_relative_position must lie strictly inside the "
+                "conservative distance domain: "
+                f"{self.distance_domain.d_min_conservative} < ||d|| < "
+                f"{self.distance_domain.d_max_conservative}; got ||d||="
+                f"{distance:.6g}."
+            )
+        return desired.copy()
+
+    def set_desired_relative_position(
+        self,
+        desired_relative_position,
+    ) -> None:
+        """Update the formation reference without resetting controller state.
+
+        Only the desired formation and the two distance-barrier reference
+        templates depend on this vector. Command-filter and adaptive-domain
+        states are intentionally preserved so an online formation change is
+        handled as a reference switch rather than a controller reset.
+        """
+        desired = self._validate_desired_relative_position(
+            desired_relative_position
+        )
+        cfg = self.task_config
+
+        self._desired_relative_position = desired
+        self._templates = _AdaptiveTemplates(
+            collision=AdaptiveConstraintBarrierPotential(
+                constraint=MinimumDistanceConstraint(
+                    self.distance_domain.d_min_conservative
+                ),
+                reference_state=desired,
+                weight=cfg.collision_barrier_weight,
+            ),
+            sensing_range=AdaptiveConstraintBarrierPotential(
+                constraint=MaximumDistanceConstraint(
+                    self.distance_domain.d_max_conservative
+                ),
+                reference_state=desired,
+                weight=cfg.range_barrier_weight,
+            ),
+            horizontal_fov=self._templates.horizontal_fov,
+            vertical_fov=self._templates.vertical_fov,
+        )
+
     def _edge_potential(self) -> EdgePotential:
         cfg = self.task_config
-        desired_relative = np.asarray(
-            cfg.desired_relative_position,
-            dtype=float,
-        )
+        desired_relative = self._desired_relative_position
         desired_image = NormalizedImagePoint(0.0, 0.0)
 
         if cfg.adaptive:
@@ -404,10 +471,7 @@ class FollowerCoreRuntime:
                 follower_state=follower_state,
                 parent_position=parent_state[:3],
                 parent_velocity_inertial=parent_velocity_for_snapshot,
-                desired_relative_position=np.asarray(
-                    self.task_config.desired_relative_position,
-                    dtype=float,
-                ),
+                desired_relative_position=self._desired_relative_position,
                 evaluation=evaluation,
                 conservative_values=kinematics.values,
                 relaxation_state=relaxation_state,

@@ -59,6 +59,7 @@ from formation_control.visualization.domain_relaxation_plot import (
 PAPER_PLOTS = {
     "trajectory",
     "leader_tracking",
+    "formation_error",
     "distance",
     "fov",
     "adaptive_fov",
@@ -532,6 +533,60 @@ def _trajectory_figure(data: dict[str, object], paper_quality: bool):
     return result[0] if isinstance(result, tuple) else result
 
 
+
+def _formation_error_figure(data: dict[str, object], paper_quality: bool):
+    """Plot ||(p_target-p_observer)-d_des|| for every directed follower edge."""
+    arrays = data["arrays"]
+    graph = data["graph"]
+    robots = data["robots"]
+
+    times = np.asarray(arrays["times"], dtype=float)
+    positions = np.asarray(arrays["positions"], dtype=float)
+    desired = np.asarray(arrays["desired_relative_position"], dtype=float)
+
+    apply_visualization_style(paper_quality=paper_quality)
+    figure, axis = plt.subplots()
+
+    plotted = False
+    for edge in graph:
+        observer = edge.observer
+        target = edge.target
+
+        actual_relative = (
+            positions[:, target, :] - positions[:, observer, :]
+        )
+        desired_relative = desired[:, observer, :]
+        error_vector = actual_relative - desired_relative
+
+        valid = (
+            np.all(np.isfinite(error_vector), axis=1)
+            & np.isfinite(times)
+        )
+        if np.count_nonzero(valid) < 2:
+            continue
+
+        error_norm = np.linalg.norm(error_vector[valid], axis=1)
+        axis.plot(
+            times[valid],
+            error_norm,
+            label=f"{robots[observer]}->{robots[target]}",
+        )
+        plotted = True
+
+    if not plotted:
+        plt.close(figure)
+        return None
+
+    axis.set_xlabel(r"$t$ [s]")
+    axis.set_ylabel(r"$\|e_{ij}^{\mathrm{form}}\|$ [m]")
+    axis.set_title("Formation error")
+    axis.grid(True, alpha=0.3)
+    if len(tuple(graph.edges)) > 1:
+        axis.legend()
+    figure.tight_layout()
+    return figure
+
+
 def _leader_tracking_figure(data: dict[str, object], paper_quality: bool):
     arrays = data["arrays"]
     graph = data["graph"]
@@ -634,6 +689,29 @@ def _print_summary(data: dict[str, object]) -> None:
         if finite.size:
             print(f"Fallback samples: {100.0 * np.mean(finite > 0.5):.2f}%")
 
+        positions = np.asarray(arrays["positions"], dtype=float)
+        desired = np.asarray(
+            arrays["desired_relative_position"],
+            dtype=float,
+        )
+        for edge in graph:
+            observer = edge.observer
+            target = edge.target
+            error_vector = (
+                positions[:, target, :]
+                - positions[:, observer, :]
+                - desired[:, observer, :]
+            )
+            valid = np.all(np.isfinite(error_vector), axis=1)
+            if not np.any(valid):
+                continue
+            error_norm = np.linalg.norm(error_vector[valid], axis=1)
+            print(
+                f"Formation error {robots[observer]}->{robots[target]}: "
+                f"RMS {np.sqrt(np.mean(error_norm**2)):.4f} m, "
+                f"max {np.max(error_norm):.4f} m"
+            )
+
     root = graph.root
     p_ref = np.asarray(arrays["reference_position"][:, root], dtype=float)
     v_ref = np.asarray(arrays["reference_velocity"][:, root], dtype=float)
@@ -697,6 +775,11 @@ def main() -> None:
     parser.add_argument("--all", action="store_true", help="all available diagnostics")
     parser.add_argument("--trajectory", action="store_true")
     parser.add_argument("--leader-tracking", dest="leader_tracking", action="store_true")
+    parser.add_argument(
+        "--formation-error",
+        dest="formation_error",
+        action="store_true",
+    )
     parser.add_argument("--distance", action="store_true")
     parser.add_argument("--fov", action="store_true")
     parser.add_argument("--adaptive-fov", dest="adaptive_fov", action="store_true")
@@ -760,6 +843,17 @@ def main() -> None:
             print(
                 "Skipping leader-tracking plot: leader reference_position was "
                 "not present in the snapshot."
+            )
+
+    if "formation_error" in selected:
+        figures["formation_error"] = _formation_error_figure(
+            data,
+            args.paper_quality,
+        )
+        if figures["formation_error"] is None:
+            print(
+                "Skipping formation-error plot: no edge had at least two "
+                "finite desired-relative-position samples."
             )
 
     if "distance" in selected:

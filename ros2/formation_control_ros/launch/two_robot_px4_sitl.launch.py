@@ -11,6 +11,7 @@ def generate_launch_description() -> LaunchDescription:
     follower = LaunchConfiguration("follower")
     dt = LaunchConfiguration("dt")
     dry_run = LaunchConfiguration("dry_run")
+    leader_reference_mode = LaunchConfiguration("leader_reference_mode")
 
     common = {
         "dt": dt,
@@ -39,6 +40,10 @@ def generate_launch_description() -> LaunchDescription:
                 "dry_run",
                 default_value="true",
             ),
+            DeclareLaunchArgument(
+                "leader_reference_mode",
+                default_value="stationary",
+            ),
             Node(
                 package="formation_control_ros",
                 executable="leader_controller",
@@ -49,7 +54,7 @@ def generate_launch_description() -> LaunchDescription:
                     common,
                     {
                         "robot_name": leader,
-                        "reference_mode": "stationary",
+                        "reference_mode": leader_reference_mode,
                     },
                 ],
             ),
@@ -72,6 +77,20 @@ def generate_launch_description() -> LaunchDescription:
                         "robot_name": follower,
                         "parent_robot_name": leader,
                         "desired_relative_position": [0.0, -1.80, 0.0],
+                        "formation_names": [
+                            "close",
+                            "nominal",
+                            "far",
+                            "lateral",
+                            "diagonal_high",
+                        ],
+                        "formation_relative_positions": [
+                            0.0, -0.95, 0.0,
+                            0.0, -1.80, 0.0,
+                            0.0, -2.80, 0.0,
+                            1.80, 0.0, 0.0,
+                            1.60, -1.60, 0.70,
+                        ],
                         "adaptive": True,
                     },
                 ],
