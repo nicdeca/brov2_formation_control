@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import rclpy
-from geometry_msgs.msg import TwistStamped
+from geometry_msgs.msg import Twist, TwistStamped
 from nav_msgs.msg import Odometry
 from px4_msgs.msg import VehicleOdometry
 from rclpy.node import Node
@@ -43,6 +43,11 @@ class LeaderControllerNode(Node):
             "velocity_command_topic",
             "formation_control/velocity_command",
         )
+        self.declare_parameter(
+            "cmd_vel_topic",
+            "formation_control/cmd_vel",
+        )
+        self.declare_parameter("velocity_command_timeout", 0.35)
         self.declare_parameter(
             "trajectory_point_topic",
             "formation_control/trajectory_point",
@@ -110,6 +115,7 @@ class LeaderControllerNode(Node):
         self._stationary_reference: LeaderTrajectorySample | None = None
 
         self._velocity_command = np.zeros(3)
+        self._velocity_command_receipt = -np.inf
         self._velocity_reference: VelocityCommandReference | None = None
 
         self._trajectory_reference: LeaderTrajectorySample | None = None
@@ -134,10 +140,19 @@ class LeaderControllerNode(Node):
             topic = str(
                 self.get_parameter("velocity_command_topic").value
             )
+            cmd_vel_topic = str(
+                self.get_parameter("cmd_vel_topic").value
+            )
             self.create_subscription(
                 TwistStamped,
                 topic,
                 self._velocity_command_callback,
+                10,
+            )
+            self.create_subscription(
+                Twist,
+                cmd_vel_topic,
+                self._cmd_vel_callback,
                 10,
             )
         elif self.reference_mode == "trajectory":
@@ -217,21 +232,62 @@ class LeaderControllerNode(Node):
                 )
             )
 
+    def _accept_velocity_command(
+        self,
+        incoming_world: np.ndarray,
+    ) -> None:
+        if not np.all(np.isfinite(incoming_world)):
+            self.get_logger().error(
+                "Rejected non-finite leader velocity command."
+            )
+            return
+        self._velocity_command = self.frames.world_vector_to_core(
+            incoming_world
+        )
+        self._velocity_command_receipt = self._now_seconds()
+
     def _velocity_command_callback(
         self,
         message: TwistStamped,
     ) -> None:
-        incoming_world = np.array(
-            [
-                message.twist.linear.x,
-                message.twist.linear.y,
-                message.twist.linear.z,
-            ],
-            dtype=float,
+        self._accept_velocity_command(
+            np.array(
+                [
+                    message.twist.linear.x,
+                    message.twist.linear.y,
+                    message.twist.linear.z,
+                ],
+                dtype=float,
+            )
         )
-        self._velocity_command = self.frames.world_vector_to_core(
-            incoming_world
+
+    def _cmd_vel_callback(
+        self,
+        message: Twist,
+    ) -> None:
+        self._accept_velocity_command(
+            np.array(
+                [
+                    message.linear.x,
+                    message.linear.y,
+                    message.linear.z,
+                ],
+                dtype=float,
+            )
         )
+
+    def _active_velocity_command(self) -> np.ndarray:
+        timeout = float(
+            self.get_parameter("velocity_command_timeout").value
+        )
+        if timeout <= 0.0:
+            raise ValueError("velocity_command_timeout must be positive.")
+        if (
+            self._now_seconds() - self._velocity_command_receipt
+            > timeout
+        ):
+            return np.zeros(3, dtype=float)
+        return self._velocity_command
 
     def _trajectory_point_callback(
         self,
@@ -307,7 +363,7 @@ class LeaderControllerNode(Node):
             if self._velocity_reference is None:
                 return None
             return self._velocity_reference.sample(
-                self._velocity_command
+                self._active_velocity_command()
             )
 
         if self._trajectory_reference is None:
@@ -378,7 +434,7 @@ class LeaderControllerNode(Node):
             and self._velocity_reference is not None
         ):
             self._velocity_reference.advance(
-                self._velocity_command,
+                self._active_velocity_command(),
                 self.dt,
             )
 

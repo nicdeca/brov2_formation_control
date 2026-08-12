@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import numpy as np
 import rclpy
+from geometry_msgs.msg import Vector3Stamped
 from nav_msgs.msg import Odometry
 from px4_msgs.msg import VehicleOdometry
 from rclpy.node import Node
+from std_msgs.msg import String
 
 from .core_runtime import FollowerCoreRuntime, FollowerTaskConfig
 from .diagnostics import DiagnosticsPublisher
@@ -41,6 +43,27 @@ class FollowerControllerNode(Node):
         self.declare_parameter("self_odometry_topic", "")
         self.declare_parameter("parent_odometry_topic", "")
         self.declare_parameter("desired_relative_position", [1.8, 0.0, 0.0])
+        self.declare_parameter(
+            "desired_relative_position_topic",
+            "formation_control/desired_relative_position",
+        )
+        self.declare_parameter(
+            "desired_formation_topic",
+            "formation_control/desired_formation",
+        )
+        self.declare_parameter(
+            "formation_names",
+            ["close", "nominal", "wide", "elevated"],
+        )
+        self.declare_parameter(
+            "formation_relative_positions",
+            [
+                0.0, -1.25, 0.0,
+                0.0, -1.80, 0.0,
+                0.0, -2.40, 0.0,
+                0.0, -1.80, 0.40,
+            ],
+        )
 
         self.declare_parameter("d_min", 0.5)
         self.declare_parameter("d_max", 3.6)
@@ -114,6 +137,27 @@ class FollowerControllerNode(Node):
             raise ValueError(
                 "desired_relative_position must contain three values."
             )
+
+        formation_names = [
+            str(value)
+            for value in self.get_parameter("formation_names").value
+        ]
+        flat_formations = np.asarray(
+            self.get_parameter("formation_relative_positions").value,
+            dtype=float,
+        ).reshape(-1)
+        if len(set(formation_names)) != len(formation_names):
+            raise ValueError("formation_names must be unique.")
+        if flat_formations.size != 3 * len(formation_names):
+            raise ValueError(
+                "formation_relative_positions must contain exactly three "
+                "values for every entry in formation_names."
+            )
+        formation_vectors = flat_formations.reshape(-1, 3)
+        self._formation_library = {
+            name: formation_vectors[index].copy()
+            for index, name in enumerate(formation_names)
+        }
 
         self.frames = frame_convention_from_parameters(self)
         self.runtime = FollowerCoreRuntime(
@@ -224,6 +268,26 @@ class FollowerControllerNode(Node):
                 self._parent_odom_callback,
                 10,
             )
+
+        desired_topic = str(
+            self.get_parameter("desired_relative_position_topic").value
+        )
+        formation_topic = str(
+            self.get_parameter("desired_formation_topic").value
+        )
+        self.create_subscription(
+            Vector3Stamped,
+            desired_topic,
+            self._desired_relative_position_callback,
+            10,
+        )
+        self.create_subscription(
+            String,
+            formation_topic,
+            self._desired_formation_callback,
+            10,
+        )
+
         self.create_timer(self.dt, self._control_step)
 
         self.get_logger().info(
@@ -238,7 +302,65 @@ class FollowerControllerNode(Node):
             f"  odom twist frame: {self.frames.twist_frame}\n"
             f"  core control space: "
             f"{self.runtime.controller_config.control_space}\n"
+            f"  online relative-position topic: {desired_topic}\n"
+            f"  named-formation topic: {formation_topic}\n"
+            f"  formation library: {tuple(self._formation_library)}\n"
             f"  dry run: {self.dry_run}"
+        )
+
+    def _set_desired_relative_position(
+        self,
+        desired_core: np.ndarray,
+        *,
+        source: str,
+    ) -> None:
+        try:
+            self.runtime.set_desired_relative_position(desired_core)
+        except ValueError as error:
+            self.get_logger().error(
+                f"Rejected desired formation from {source}: {error}"
+            )
+            return
+
+        desired = self.runtime.desired_relative_position
+        self.get_logger().info(
+            "Updated desired parent-minus-follower vector from "
+            f"{source}: {desired.tolist()}"
+        )
+
+    def _desired_relative_position_callback(
+        self,
+        message: Vector3Stamped,
+    ) -> None:
+        incoming_world = np.array(
+            [
+                message.vector.x,
+                message.vector.y,
+                message.vector.z,
+            ],
+            dtype=float,
+        )
+        desired_core = self.frames.world_vector_to_core(incoming_world)
+        self._set_desired_relative_position(
+            desired_core,
+            source="desired_relative_position topic",
+        )
+
+    def _desired_formation_callback(
+        self,
+        message: String,
+    ) -> None:
+        name = message.data.strip()
+        desired = self._formation_library.get(name)
+        if desired is None:
+            self.get_logger().error(
+                f"Unknown formation {name!r}. Available formations: "
+                f"{tuple(self._formation_library)}"
+            )
+            return
+        self._set_desired_relative_position(
+            desired,
+            source=f"formation library entry {name!r}",
         )
 
     def _now_seconds(self) -> float:
