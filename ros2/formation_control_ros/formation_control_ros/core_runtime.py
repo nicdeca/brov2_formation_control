@@ -57,6 +57,11 @@ from formation_control.potentials import (
     RelativePositionPotential,
 )
 from formation_control.simulation import RK4Integrator
+from formation_control.workspace import (
+    AxisAlignedWorkspaceDomain,
+    WorkspaceBarrierPotential,
+    WorkspaceRelaxationPolicy,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +76,23 @@ class CoreControllerConfig:
     slack_linear_penalty: float = 100.0
     slack_quadratic_penalty: float = 5e3
     alpha_gain: float = 0.8
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceConfig:
+    """Switchable pool-workspace barrier and relaxation configuration."""
+
+    enabled: bool = False
+    adaptive: bool = True
+    physical_lower: tuple[float, float, float] = (-3.125, -1.225, -96.58)
+    physical_upper: tuple[float, float, float] = (0.825, 5.575, -94.20)
+    conservative_lower: tuple[float, float, float] = (-2.975, -1.075, -96.38)
+    conservative_upper: tuple[float, float, float] = (0.675, 5.425, -94.75)
+    barrier_weight: float = 0.10
+    reference_margin: float = 0.05
+    relaxation_recovery_gain: float = 0.8
+    relaxation_domain_margin_ratio: float = 0.10
+    minimum_constraint_margin: float = 1e-3
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,9 +125,21 @@ class ControllerDiagnostics:
     required_slack: float | None
     actuation_margin: float | None
     thruster_utilization: float
+
+    # Existing four-channel sensing-domain diagnostics.
     relaxation_state: np.ndarray
     conservative_constraint_values: np.ndarray
     minimum_physical_margin: float
+
+    # Separate six-channel workspace diagnostics.  Keeping these fields
+    # independent preserves the meaning of the validated sensing topics.
+    workspace_barrier_enabled: bool
+    workspace_adaptive: bool
+    workspace_barrier_value: float
+    workspace_relaxation_state: np.ndarray
+    workspace_conservative_constraint_values: np.ndarray
+    workspace_physical_constraint_values: np.ndarray
+    workspace_minimum_physical_margin: float
 
 
 @dataclass(frozen=True)
@@ -131,6 +165,129 @@ def _inertial_linear_velocity(
     return rotation @ state[7:10]
 
 
+def _workspace_generalized_gradient(
+    state: np.ndarray,
+    position_gradient: np.ndarray,
+) -> np.ndarray:
+    rotation = rotation_matrix_from_quaternion(state[3:7])
+    return np.concatenate(
+        (rotation.T @ np.asarray(position_gradient, dtype=float), np.zeros(3))
+    )
+
+
+class _WorkspaceRuntime:
+    """Shared stateful workspace barrier used by leader and followers."""
+
+    def __init__(self, config: WorkspaceConfig) -> None:
+        self.config = config
+        self.domain = AxisAlignedWorkspaceDomain(
+            physical_lower=np.asarray(config.physical_lower, dtype=float),
+            physical_upper=np.asarray(config.physical_upper, dtype=float),
+            conservative_lower=np.asarray(config.conservative_lower, dtype=float),
+            conservative_upper=np.asarray(config.conservative_upper, dtype=float),
+        )
+        self.potential = WorkspaceBarrierPotential(
+            domain=self.domain,
+            weight=config.barrier_weight,
+            reference_margin=config.reference_margin,
+        )
+        self.relaxation = WorkspaceRelaxationPolicy(
+            maximum_enlargement=self.domain.maximum_enlargement,
+            recovery_gain=config.relaxation_recovery_gain,
+            domain_margin_ratio=config.relaxation_domain_margin_ratio,
+            minimum_constraint_margin=config.minimum_constraint_margin,
+        )
+        self.state = np.zeros(6, dtype=float)
+
+    def set_state(self, state: np.ndarray) -> None:
+        self.state = self.relaxation.validate_state(state).copy()
+
+    def project_to_current_domain(self, position: np.ndarray) -> None:
+        if not (self.config.enabled and self.config.adaptive):
+            return
+        projected, _ = self.relaxation.project_to_current_domain(
+            self.state,
+            self.domain.conservative_values(position),
+        )
+        self.state = projected
+
+    def evaluate(self, state: np.ndarray, reference_position: np.ndarray):
+        if not self.config.enabled:
+            return None
+        self.project_to_current_domain(state[:3])
+        return self.potential.evaluate(
+            state[:3],
+            reference_position,
+            self.state,
+        )
+
+    def selected_rate(self, state: np.ndarray, *, dt: float) -> np.ndarray:
+        if not (self.config.enabled and self.config.adaptive):
+            return np.zeros(6, dtype=float)
+        evaluation = self.relaxation.evaluate(
+            self.state,
+            conservative_values=self.domain.conservative_values(state[:3]),
+            conservative_rates=self.domain.conservative_rates(
+                _inertial_linear_velocity(state)
+            ),
+            sample_time=dt,
+        )
+        return np.asarray(evaluation.selected_rate, dtype=float)
+
+    def advance(self, rate: np.ndarray, *, dt: float) -> None:
+        if not (self.config.enabled and self.config.adaptive):
+            return
+        self.state = np.clip(
+            self.state + dt * np.asarray(rate, dtype=float),
+            0.0,
+            1.0,
+        )
+
+    def reference_bounds(self) -> tuple[np.ndarray, np.ndarray] | None:
+        if not self.config.enabled:
+            return None
+        lower, upper = self.domain.adaptive_bounds(self.state)
+        margin = self.config.reference_margin
+        return lower + margin, upper - margin
+
+    def diagnostics(
+        self,
+        evaluation,
+        *,
+        relaxation_state: np.ndarray | None = None,
+    ) -> dict[str, object]:
+        if evaluation is None:
+            return {
+                "workspace_barrier_enabled": False,
+                "workspace_adaptive": False,
+                "workspace_barrier_value": 0.0,
+                "workspace_relaxation_state": np.zeros(6),
+                "workspace_conservative_constraint_values": np.full(6, np.nan),
+                "workspace_physical_constraint_values": np.full(6, np.nan),
+                "workspace_minimum_physical_margin": np.nan,
+            }
+        state_for_diagnostics = (
+            self.state
+            if relaxation_state is None
+            else self.relaxation.validate_state(relaxation_state)
+        )
+        return {
+            "workspace_barrier_enabled": True,
+            "workspace_adaptive": bool(self.config.adaptive),
+            "workspace_barrier_value": float(evaluation.value),
+            "workspace_relaxation_state": state_for_diagnostics.copy(),
+            "workspace_conservative_constraint_values": (
+                np.asarray(evaluation.conservative_values, dtype=float).copy()
+            ),
+            "workspace_physical_constraint_values": (
+                np.asarray(evaluation.physical_values, dtype=float).copy()
+            ),
+            "workspace_minimum_physical_margin": float(
+                evaluation.minimum_physical_margin
+            ),
+        }
+
+
 class FollowerCoreRuntime:
     """Stateful one-parent follower controller."""
 
@@ -138,9 +295,12 @@ class FollowerCoreRuntime:
         self,
         controller_config: CoreControllerConfig,
         task_config: FollowerTaskConfig,
+        workspace_config: WorkspaceConfig = WorkspaceConfig(),
     ) -> None:
         self.controller_config = controller_config
         self.task_config = task_config
+        self.workspace_config = workspace_config
+        self._workspace = _WorkspaceRuntime(workspace_config)
 
         self.model = BlueROV2Model()
         self.allocation = BlueROV2HeavyThrusterAllocation.default_45deg(
@@ -241,6 +401,14 @@ class FollowerCoreRuntime:
     @property
     def relaxation_state(self) -> np.ndarray:
         return self._relaxation_state.copy()
+
+    @property
+    def workspace_relaxation_state(self) -> np.ndarray:
+        return self._workspace.state.copy()
+
+    def set_workspace_relaxation_state(self, state: np.ndarray) -> None:
+        """Transfer workspace relaxation across experiment-phase runtimes."""
+        self._workspace.set_state(state)
 
     @property
     def desired_relative_position(self) -> np.ndarray:
@@ -382,10 +550,27 @@ class FollowerCoreRuntime:
             )
             self._relaxation_state = projected
 
+        workspace_reference = (
+            parent_state[:3] - self._desired_relative_position
+        )
+        workspace_evaluation = self._workspace.evaluate(
+            follower_state,
+            workspace_reference,
+        )
+        workspace_gradient = (
+            None
+            if workspace_evaluation is None
+            else _workspace_generalized_gradient(
+                follower_state,
+                workspace_evaluation.position_gradient,
+            )
+        )
+
         self._filter_state = self.controller.initialize_filter(
             follower_state=follower_state,
             parent_position=parent_state[:3],
             edge_potential=self._edge_potential(),
+            configuration_gradient_offset=workspace_gradient,
         )
 
     def step(
@@ -435,12 +620,40 @@ class FollowerCoreRuntime:
             )
             parent_velocity_argument = parent_velocity_for_snapshot
 
+        workspace_reference = (
+            parent_state[:3] - self._desired_relative_position
+        )
+        workspace_evaluation = self._workspace.evaluate(
+            follower_state,
+            workspace_reference,
+        )
+        workspace_gradient = (
+            None
+            if workspace_evaluation is None
+            else _workspace_generalized_gradient(
+                follower_state,
+                workspace_evaluation.position_gradient,
+            )
+        )
+
         evaluation = self.controller.evaluate(
             follower_state=follower_state,
             parent_position=parent_state[:3],
             parent_linear_velocity_inertial=parent_velocity_argument,
             edge_potential=self._edge_potential(),
             filter_state=self._filter_state,
+            configuration_value_offset=(
+                0.0
+                if workspace_evaluation is None
+                else float(workspace_evaluation.value)
+            ),
+            configuration_gradient_offset=workspace_gradient,
+        )
+
+        workspace_relaxation_state = self._workspace.state.copy()
+        workspace_relaxation_rate = self._workspace.selected_rate(
+            follower_state,
+            dt=dt,
         )
 
         relaxation_rate = np.zeros(4, dtype=float)
@@ -497,6 +710,9 @@ class FollowerCoreRuntime:
                 1.0,
             )
 
+        self._workspace.state = workspace_relaxation_state
+        self._workspace.advance(workspace_relaxation_rate, dt=dt)
+
         self._filter_state = self._integrator.step(
             self.controller.dynamics_controller.command_filter,
             self._filter_state,
@@ -529,6 +745,10 @@ class FollowerCoreRuntime:
                     dtype=float,
                 ).copy(),
                 minimum_physical_margin=physical_margin,
+                **self._workspace.diagnostics(
+                    workspace_evaluation,
+                    relaxation_state=workspace_relaxation_state,
+                ),
             ),
             snapshot=snapshot,
         )
@@ -544,7 +764,10 @@ class LeaderCoreRuntime:
         *,
         position_gain: float = 1.0,
         attitude_gain: float = 1.0,
+        workspace_config: WorkspaceConfig = WorkspaceConfig(),
     ) -> None:
+        self.workspace_config = workspace_config
+        self._workspace = _WorkspaceRuntime(workspace_config)
         self.model = BlueROV2Model()
         self.allocation = BlueROV2HeavyThrusterAllocation.default_45deg(
             voltage=controller_config.thruster_voltage,
@@ -574,6 +797,19 @@ class LeaderCoreRuntime:
     def initialized(self) -> bool:
         return self._leader is not None
 
+    @property
+    def workspace_relaxation_state(self) -> np.ndarray:
+        return self._workspace.state.copy()
+
+    def set_workspace_relaxation_state(self, state: np.ndarray) -> None:
+        self._workspace.set_state(state)
+
+    def workspace_reference_bounds(
+        self,
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        """Bounds used to keep integrated manual references inside the pool."""
+        return self._workspace.reference_bounds()
+
     def initialize(
         self,
         state: np.ndarray,
@@ -587,9 +823,22 @@ class LeaderCoreRuntime:
             attitude_gain=self._attitude_gain,
         )
         self._leader = controller
+        workspace_evaluation = self._workspace.evaluate(
+            state,
+            reference.position,
+        )
+        workspace_gradient = (
+            None
+            if workspace_evaluation is None
+            else _workspace_generalized_gradient(
+                state,
+                workspace_evaluation.position_gradient,
+            )
+        )
         self._filter_state = controller.initialize_filter(
             state=state,
             reference=reference,
+            configuration_gradient_offset=workspace_gradient,
         )
 
     def step(
@@ -607,10 +856,33 @@ class LeaderCoreRuntime:
         assert self._filter_state is not None
 
         start_time = perf_counter()
+        workspace_evaluation = self._workspace.evaluate(
+            state,
+            reference.position,
+        )
+        workspace_gradient = (
+            None
+            if workspace_evaluation is None
+            else _workspace_generalized_gradient(
+                state,
+                workspace_evaluation.position_gradient,
+            )
+        )
         evaluation = self._leader.evaluate(
             state=state,
             reference=reference,
             filter_state=self._filter_state,
+            configuration_value_offset=(
+                0.0
+                if workspace_evaluation is None
+                else float(workspace_evaluation.value)
+            ),
+            configuration_gradient_offset=workspace_gradient,
+        )
+        workspace_relaxation_state = self._workspace.state.copy()
+        workspace_relaxation_rate = self._workspace.selected_rate(
+            state,
+            dt=dt,
         )
         controller_time_s = perf_counter() - start_time
 
@@ -641,6 +913,9 @@ class LeaderCoreRuntime:
             },
         )
 
+        self._workspace.state = workspace_relaxation_state
+        self._workspace.advance(workspace_relaxation_rate, dt=dt)
+
         self._filter_state = self._integrator.step(
             self._leader.dynamics_controller.command_filter,
             self._filter_state,
@@ -658,6 +933,10 @@ class LeaderCoreRuntime:
                 relaxation_state=np.zeros(4),
                 conservative_constraint_values=np.full(4, np.nan),
                 minimum_physical_margin=np.nan,
+                **self._workspace.diagnostics(
+                    workspace_evaluation,
+                    relaxation_state=workspace_relaxation_state,
+                ),
             ),
             snapshot=snapshot,
         )

@@ -74,7 +74,12 @@ MANIFEST="$RUN_DIR/run_manifest.yaml"
   done
 } > "$MANIFEST"
 
-TOPICS=(/clock)
+# Global experiment lifecycle information is recorded once.
+TOPICS=(
+  /clock
+  /formation_control/experiment_phase
+)
+
 for robot in "${ROBOT_ARRAY[@]}"; do
   prefix="/${robot}"
   TOPICS+=(
@@ -83,8 +88,10 @@ for robot in "${ROBOT_ARRAY[@]}"; do
     "${prefix}/fmu/in/vehicle_thrust_setpoint"
     "${prefix}/fmu/in/vehicle_torque_setpoint"
     "${prefix}/formation_control/diagnostic_snapshot"
-    # Keep the existing readable diagnostics in the bag as well. The offline
-    # exporter uses the atomic snapshot as its authoritative source.
+
+    # Existing human-readable sensing/controller diagnostics.  The offline
+    # exporter continues to use the atomic diagnostic snapshot as its
+    # authoritative synchronized source.
     "${prefix}/formation_control/fallback"
     "${prefix}/formation_control/slack"
     "${prefix}/formation_control/required_slack"
@@ -93,6 +100,16 @@ for robot in "${ROBOT_ARRAY[@]}"; do
     "${prefix}/formation_control/minimum_physical_margin"
     "${prefix}/formation_control/conservative_constraint_values"
     "${prefix}/formation_control/domain_relaxation"
+
+    # Stage-B workspace diagnostics.  These are intentionally separate from
+    # the four-channel sensing-domain diagnostics above.
+    "${prefix}/formation_control/workspace_barrier_enabled"
+    "${prefix}/formation_control/workspace_adaptive"
+    "${prefix}/formation_control/workspace_barrier_value"
+    "${prefix}/formation_control/workspace_relaxation"
+    "${prefix}/formation_control/workspace_conservative_constraint_values"
+    "${prefix}/formation_control/workspace_physical_constraint_values"
+    "${prefix}/formation_control/workspace_minimum_physical_margin"
   )
 done
 

@@ -68,3 +68,30 @@ class VelocityCommandReference:
             + delta * (1.0 - decay) / self.bandwidth
         )
         self.velocity = command + decay * delta
+
+    def project_to_box(
+        self,
+        lower: np.ndarray,
+        upper: np.ndarray,
+    ) -> None:
+        """Project the integrated reference into an axis-aligned box.
+
+        Any velocity component still pointing outward at an active bound is
+        reset to zero. This prevents manual-command reference windup against
+        the workspace barrier.
+        """
+        lower = np.asarray(lower, dtype=float).reshape(3)
+        upper = np.asarray(upper, dtype=float).reshape(3)
+        if not (np.all(np.isfinite(lower)) and np.all(np.isfinite(upper))):
+            raise ValueError("reference bounds must be finite.")
+        if np.any(lower >= upper):
+            raise ValueError("reference lower bounds must be below upper bounds.")
+
+        projected = np.clip(self.position, lower, upper)
+        for index in range(3):
+            if projected[index] <= lower[index] and self.velocity[index] < 0.0:
+                self.velocity[index] = 0.0
+            elif projected[index] >= upper[index] and self.velocity[index] > 0.0:
+                self.velocity[index] = 0.0
+        self.position = projected
+
