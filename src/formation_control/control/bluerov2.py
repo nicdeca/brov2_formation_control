@@ -53,6 +53,15 @@ def _vector3(value: FloatArray, *, name: str) -> FloatArray:
     return array
 
 
+def _vector6(value: FloatArray, *, name: str) -> FloatArray:
+    array = np.asarray(value, dtype=float)
+    if array.shape != (6,):
+        raise ValueError(f"{name} must have shape (6,), got {array.shape}.")
+    if not np.all(np.isfinite(array)):
+        raise ValueError(f"{name} must contain only finite values.")
+    return array
+
+
 @dataclass(frozen=True)
 class BlueROV2AgentEvaluation:
     """Potential and dynamic-control results for one BlueROV2 follower."""
@@ -176,6 +185,7 @@ class BlueROV2AgentController:
         parent_position: FloatArray,
         edge_potential: EdgePotential,
         feedforward_velocity_body: FloatArray | None = None,
+        configuration_gradient_offset: FloatArray | None = None,
     ) -> FloatArray:
         """Initialize the command filter at the initial virtual command."""
         _, zeta = self.evaluate_edge_potential(
@@ -183,6 +193,11 @@ class BlueROV2AgentController:
             parent_position=parent_position,
             edge_potential=edge_potential,
         )
+        if configuration_gradient_offset is not None:
+            zeta = zeta + _vector6(
+                configuration_gradient_offset,
+                name="configuration_gradient_offset",
+            )
 
         return self.dynamics_controller.initialize_filter(
             zeta,
@@ -199,6 +214,7 @@ class BlueROV2AgentController:
         parent_linear_velocity_inertial: FloatArray | None = None,
         feedforward_velocity_body: FloatArray | None = None,
         configuration_value_offset: float = 0.0,
+        configuration_gradient_offset: FloatArray | None = None,
         control_gradient_offset: FloatArray | None = None,
         control_reference: FloatArray | None = None,
         control_lower: FloatArray | None = None,
@@ -217,10 +233,11 @@ class BlueROV2AgentController:
         uses zero for that term and the actual parent motion can be treated as
         an interconnection perturbation in the analysis.
 
-        ``configuration_value_offset`` can add a nonnegative auxiliary-state
-        storage term to the CLF without changing the robot configuration
-        gradient.  Its derivative with respect to optimized auxiliary inputs
-        must be supplied consistently through ``control_gradient_offset``.
+        ``configuration_value_offset`` and ``configuration_gradient_offset``
+        can add a nonnegative single-agent storage term (for example a
+        workspace barrier) without modifying the edge-potential abstraction.
+        ``control_gradient_offset`` remains available for auxiliary terms that
+        depend directly on optimized inputs.
         """
         _, _, generalized_velocity = self.model.split_state(follower_state)
 
@@ -229,6 +246,11 @@ class BlueROV2AgentController:
             parent_position=parent_position,
             edge_potential=edge_potential,
         )
+        if configuration_gradient_offset is not None:
+            zeta = zeta + _vector6(
+                configuration_gradient_offset,
+                name="configuration_gradient_offset",
+            )
 
         if parent_linear_velocity_inertial is None:
             configuration_rate_offset = 0.0

@@ -49,6 +49,15 @@ def _vector3(value: FloatArray, *, name: str) -> FloatArray:
     return vector
 
 
+def _vector6(value: FloatArray, *, name: str) -> FloatArray:
+    vector = np.asarray(value, dtype=float)
+    if vector.shape != (6,):
+        raise ValueError(f"{name} must have shape (6,), got {vector.shape}.")
+    if not np.all(np.isfinite(vector)):
+        raise ValueError(f"{name} must contain only finite values.")
+    return vector
+
+
 def _rotation(value: FloatArray, *, name: str) -> FloatArray:
     rotation = np.asarray(value, dtype=float)
     if rotation.shape != (3, 3):
@@ -273,9 +282,15 @@ class BlueROV2LeaderController:
         *,
         state: FloatArray,
         reference: LeaderTrajectorySample,
+        configuration_gradient_offset: FloatArray | None = None,
     ) -> FloatArray:
         """Initialize the filter on the feedback part of the virtual twist."""
         _, gradient, _, _ = self.tracking_terms(state, reference)
+        if configuration_gradient_offset is not None:
+            gradient = gradient + _vector6(
+                configuration_gradient_offset,
+                name="configuration_gradient_offset",
+            )
         return self.dynamics_controller.initialize_feedback_filter(gradient)
 
     def evaluate(
@@ -284,6 +299,8 @@ class BlueROV2LeaderController:
         state: FloatArray,
         reference: LeaderTrajectorySample,
         filter_state: FloatArray,
+        configuration_value_offset: float = 0.0,
+        configuration_gradient_offset: FloatArray | None = None,
         control_reference: FloatArray | None = None,
         control_lower: FloatArray | None = None,
         control_upper: FloatArray | None = None,
@@ -296,6 +313,19 @@ class BlueROV2LeaderController:
             feedforward_velocity,
             feedforward_velocity_derivative,
         ) = self.tracking_terms(state, reference)
+
+        if not np.isfinite(configuration_value_offset) or configuration_value_offset < 0.0:
+            raise ValueError(
+                "configuration_value_offset must be finite and nonnegative."
+            )
+        configuration_value = float(
+            configuration_value + configuration_value_offset
+        )
+        if configuration_gradient_offset is not None:
+            gradient = gradient + _vector6(
+                configuration_gradient_offset,
+                name="configuration_gradient_offset",
+            )
 
         evaluation = self.dynamics_controller.evaluate_with_feedforward_derivative(
             configuration_value=configuration_value,

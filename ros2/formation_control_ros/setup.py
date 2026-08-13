@@ -39,6 +39,10 @@ setup(
                 "offboard_heartbeat_wrench = "
                 "formation_control_ros.offboard_heartbeat_wrench:main"
             ),
+            (
+                "experiment_phase_manager = "
+                "formation_control_ros.experiment_phase_manager:main"
+            ),
         ],
     },
 )

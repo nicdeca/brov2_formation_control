@@ -8,6 +8,7 @@ from geometry_msgs.msg import Twist, TwistStamped
 from nav_msgs.msg import Odometry
 from px4_msgs.msg import VehicleOdometry
 from rclpy.node import Node
+from std_msgs.msg import String
 from trajectory_msgs.msg import MultiDOFJointTrajectoryPoint
 
 from formation_control.control.bluerov2_leader import LeaderTrajectorySample
@@ -28,6 +29,10 @@ from .state_adapter import (
     odometry_to_core_state,
     px4_vehicle_odometry_to_core_state,
 )
+from .workspace_parameters import (
+    declare_workspace_parameters,
+    workspace_config_from_parameters,
+)
 
 
 class LeaderControllerNode(Node):
@@ -36,6 +41,7 @@ class LeaderControllerNode(Node):
     def __init__(self) -> None:
         super().__init__("formation_leader_controller")
         declare_common_parameters(self)
+        declare_workspace_parameters(self)
 
         self.declare_parameter("reference_mode", "stationary")
         self.declare_parameter("odometry_topic", "")
@@ -55,6 +61,11 @@ class LeaderControllerNode(Node):
         self.declare_parameter("velocity_command_bandwidth", 0.2)
         self.declare_parameter("position_gain", 1.0)
         self.declare_parameter("attitude_gain", 1.0)
+        self.declare_parameter("experiment_phase_topic", "")
+        self.declare_parameter(
+            "initialization_position",
+            [0.0, 0.0, 0.0],
+        )
 
         self.robot_name = str(self.get_parameter("robot_name").value)
         self.state_source = str(
@@ -92,8 +103,10 @@ class LeaderControllerNode(Node):
             )
 
         self.frames = frame_convention_from_parameters(self)
+        workspace_config = workspace_config_from_parameters(self)
         self.runtime = LeaderCoreRuntime(
             controller_config_from_parameters(self),
+            workspace_config=workspace_config,
             position_gain=float(
                 self.get_parameter("position_gain").value
             ),
@@ -120,6 +133,31 @@ class LeaderControllerNode(Node):
 
         self._trajectory_reference: LeaderTrajectorySample | None = None
         self._trajectory_receipt = -np.inf
+
+        phase_topic = str(
+            self.get_parameter("experiment_phase_topic").value
+        ).strip()
+        self._experiment_phase = (
+            "FORMATION" if not phase_topic else "INITIALIZE"
+        )
+
+        initialization_position = np.asarray(
+            self.get_parameter("initialization_position").value,
+            dtype=float,
+        ).reshape(-1)
+        if initialization_position.shape != (3,):
+            raise ValueError(
+                "initialization_position must contain three values."
+            )
+        if not np.all(np.isfinite(initialization_position)):
+            raise ValueError(
+                "initialization_position must be finite."
+            )
+        self._initialization_reference = LeaderTrajectorySample(
+            position=initialization_position.copy(),
+            velocity=np.zeros(3),
+            acceleration=np.zeros(3),
+        )
 
         if self.state_source == "px4":
             self.create_subscription(
@@ -166,6 +204,14 @@ class LeaderControllerNode(Node):
                 10,
             )
 
+        if phase_topic:
+            self.create_subscription(
+                String,
+                phase_topic,
+                self._experiment_phase_callback,
+                10,
+            )
+
         self.create_timer(self.dt, self._control_step)
 
         self.get_logger().info(
@@ -176,7 +222,39 @@ class LeaderControllerNode(Node):
             f"  odometry topic: {self.odometry_topic}\n"
             f"  generic-odom world frame: {self.frames.world_frame}\n"
             f"  odom twist frame: {self.frames.twist_frame}\n"
+            f"  experiment phase: {self._experiment_phase}\n"
+            f"  experiment phase topic: {phase_topic or '(disabled)'}\n"
+            f"  absolute initialization position: "
+            f"{self._initialization_reference.position.tolist()}\n"
+            f"  workspace barrier enabled: {workspace_config.enabled}\n"
+            f"  workspace adaptive: {workspace_config.adaptive}\n"
             f"  dry run: {self.dry_run}"
+        )
+
+    def _experiment_phase_callback(self, message: String) -> None:
+        phase = message.data.strip().upper()
+        if phase not in ("INITIALIZE", "FORMATION"):
+            self.get_logger().error(
+                f"Unknown experiment phase {message.data!r}; expected "
+                "INITIALIZE or FORMATION."
+            )
+            return
+
+        if phase == self._experiment_phase:
+            return
+
+        if (
+            self._experiment_phase == "FORMATION"
+            and phase == "INITIALIZE"
+        ):
+            self.get_logger().error(
+                "Ignoring unsupported FORMATION -> INITIALIZE transition."
+            )
+            return
+
+        self._experiment_phase = phase
+        self.get_logger().info(
+            f"Experiment phase changed to {self._experiment_phase}."
         )
 
     def _now_seconds(self) -> float:
@@ -356,6 +434,9 @@ class LeaderControllerNode(Node):
         )
 
     def _reference(self) -> LeaderTrajectorySample | None:
+        if self._experiment_phase == "INITIALIZE":
+            return self._initialization_reference
+
         if self.reference_mode == "stationary":
             return self._stationary_reference
 
@@ -430,13 +511,17 @@ class LeaderControllerNode(Node):
             self.snapshot_publisher.publish(result.snapshot)
 
         if (
-            self.reference_mode == "velocity"
+            self._experiment_phase == "FORMATION"
+            and self.reference_mode == "velocity"
             and self._velocity_reference is not None
         ):
             self._velocity_reference.advance(
                 self._active_velocity_command(),
                 self.dt,
             )
+            bounds = self.runtime.workspace_reference_bounds()
+            if bounds is not None:
+                self._velocity_reference.project_to_box(*bounds)
 
 
 def main(args=None) -> None:
