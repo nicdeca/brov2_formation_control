@@ -190,17 +190,17 @@ class ThreeRobotExperimentRunner(Node):
         self._spin_sleep(duration)
 
     def run_sequence(self) -> None:
-        """Execute the final, visually clear three-robot demonstration.
+        """Execute the final, large-excursion three-robot demonstration.
 
         Approximate leader-reference excursion:
-            +1.0 m in y
-            +0.5 m in x
-            -1.0 m in y
-            -0.5 m in x
+            +1.4 m in y
+            +0.7 m in x
+            -1.4 m in y
+            -0.7 m in x
 
-        The leader therefore returns close to its initial reference while
-        the follower formation cycles through nominal, wide, compact, high,
-        and back to nominal.
+        The x displacement is intentionally performed only after the formation
+        has contracted to triangle_compact, giving both followers substantial
+        clearance from the lateral tank walls.
         """
         self.get_logger().info("=== FINAL THREE-ROBOT EXPERIMENT START ===")
 
@@ -208,36 +208,36 @@ class ThreeRobotExperimentRunner(Node):
         self.publish_formation("triangle_nominal")
         self.settle(8.0)
 
-        # 2) Move the whole nominal formation by approximately +1.0 m in y.
-        self.publish_velocity(0.0, 0.20, 0.0, duration=5.0)
+        # 2) Long translation in +y: approximately +1.4 m.
+        self.publish_velocity(0.0, 0.20, 0.0, duration=7.0)
         self.settle(8.0)
 
-        # 3) Strongly increase the footprint.
+        # 3) Strong expansion.
         self.publish_formation("triangle_wide")
         self.settle(12.0)
 
-        # 4) Translate the wide formation by approximately +0.5 m in x.
-        self.publish_velocity(0.125, 0.0, 0.0, duration=4.0)
-        self.settle(8.0)
-
-        # 5) Strong contraction: wide -> compact should be very visible.
+        # 4) Strong contraction before the larger lateral leader maneuver.
         self.publish_formation("triangle_compact")
         self.settle(12.0)
 
-        # 6) Undo the y displacement while holding the compact formation.
-        self.publish_velocity(0.0, -0.20, 0.0, duration=5.0)
+        # 5) Larger +x translation: approximately +0.7 m.
+        self.publish_velocity(0.14, 0.0, 0.0, duration=5.0)
         self.settle(8.0)
 
-        # 7) Re-expand horizontally to nominal and introduce depth split.
+        # 6) Vertical deformation at the displaced leader location.
         self.publish_formation("triangle_high")
         self.settle(12.0)
 
-        # 8) Undo the x displacement.
-        self.publish_velocity(-0.125, 0.0, 0.0, duration=4.0)
+        # 7) Undo the y displacement while holding triangle_high.
+        self.publish_velocity(0.0, -0.20, 0.0, duration=7.0)
         self.settle(8.0)
 
-        # 9) Return to the baseline formation.
+        # 8) Return to nominal shape.
         self.publish_formation("triangle_nominal")
+        self.settle(10.0)
+
+        # 9) Undo the x displacement.
+        self.publish_velocity(-0.14, 0.0, 0.0, duration=5.0)
         self.settle(12.0)
 
         self.stop_leader()

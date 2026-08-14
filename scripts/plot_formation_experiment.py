@@ -592,6 +592,83 @@ def _formation_error_figure(data: dict[str, object], paper_quality: bool):
 
 
 
+
+def _thruster_force_figures(
+    data: dict[str, object],
+    paper_quality: bool,
+) -> dict[str, plt.Figure]:
+    """Plot all logged thruster forces and force limits, one figure per robot."""
+    arrays = data["arrays"]
+    robots = data["robots"]
+    times = np.asarray(arrays["times"], dtype=float)
+    forces = np.asarray(arrays["thruster_forces"], dtype=float)
+    force_limits = np.asarray(arrays["thruster_force_limits"], dtype=float)
+
+    figures: dict[str, plt.Figure] = {}
+
+    for agent, robot in enumerate(robots):
+        values = forces[:, agent, :]
+        if values.ndim != 2:
+            continue
+
+        valid = np.any(np.isfinite(values), axis=1) & np.isfinite(times)
+        if np.count_nonzero(valid) < 2:
+            continue
+
+        # The logged pair is [reverse_magnitude, forward_magnitude].
+        # Both are positive configuration values; the signed admissible force
+        # interval is [-reverse_magnitude, +forward_magnitude].
+        # Use the first finite sample because these are fixed parameters.
+        limits_history = force_limits[:, agent, :]
+        finite_limits = np.all(np.isfinite(limits_history), axis=1)
+        if np.any(finite_limits):
+            reverse_limit, forward_limit = limits_history[
+                np.flatnonzero(finite_limits)[0]
+            ]
+        else:
+            reverse_limit = np.nan
+            forward_limit = np.nan
+
+        apply_visualization_style(paper_quality=paper_quality)
+        figure, axis = plt.subplots()
+
+        for thruster in range(values.shape[1]):
+            axis.plot(
+                times[valid],
+                values[valid, thruster],
+                label=f"T{thruster + 1}",
+            )
+
+        if np.isfinite(forward_limit):
+            axis.axhline(
+                forward_limit,
+                linestyle="--",
+                linewidth=1.2,
+                label="forward limit",
+            )
+        if np.isfinite(reverse_limit):
+            # The logged reverse limit is a positive force magnitude.
+            # The admissible signed thruster-force lower bound is therefore
+            # -reverse_limit.
+            axis.axhline(
+                -reverse_limit,
+                linestyle="--",
+                linewidth=1.2,
+                label="reverse limit",
+            )
+
+        axis.set_xlabel(r"$t$ [s]")
+        axis.set_ylabel("Thruster force [N]")
+        axis.set_title(f"Thruster forces: {robot}")
+        axis.grid(True, alpha=0.3)
+        axis.legend(ncol=2)
+        figure.tight_layout()
+
+        figures[f"thruster_forces_{robot}"] = figure
+
+    return figures
+
+
 def _leader_position_figure(data: dict[str, object], paper_quality: bool):
     """Plot actual and desired leader position component by component."""
     arrays = data["arrays"]
@@ -1365,12 +1442,16 @@ def main() -> None:
         )
 
     if "thrusters" in selected:
-        figures["thruster_forces"] = legacy.plot_thruster_forces(
-            scenario,
-            trajectory,
-            data["allocation"],
-            control_space="thruster",
+        thruster_figures = _thruster_force_figures(
+            data,
+            args.paper_quality,
         )
+        figures.update(thruster_figures)
+        if not thruster_figures:
+            print(
+                "Skipping thruster-force plots: no finite per-robot thruster "
+                "histories were found."
+            )
 
     if "controller_time" in selected:
         figures["controller_time"] = legacy.plot_controller_times(
