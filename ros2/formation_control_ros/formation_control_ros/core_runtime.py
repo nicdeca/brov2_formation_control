@@ -73,6 +73,10 @@ class CoreControllerConfig:
     thrust_derating: float = 1.0
     virtual_linear_speed_limit: float = 1.5
     virtual_angular_speed_limit: float = 2.0
+    virtual_linear_gain: float = 0.55
+    virtual_angular_gain: float = 0.80
+    command_filter_linear_bandwidth: float = 3.0
+    command_filter_angular_bandwidth: float = 4.0
     slack_linear_penalty: float = 100.0
     slack_quadratic_penalty: float = 5e3
     alpha_gain: float = 0.8
@@ -315,6 +319,27 @@ class FollowerCoreRuntime:
                 [
                     controller_config.virtual_linear_speed_limit,
                     controller_config.virtual_angular_speed_limit,
+                ],
+                dtype=float,
+            ),
+            virtual_gain=np.diag(
+                [
+                    controller_config.virtual_linear_gain,
+                    controller_config.virtual_linear_gain,
+                    controller_config.virtual_linear_gain,
+                    controller_config.virtual_angular_gain,
+                    controller_config.virtual_angular_gain,
+                    controller_config.virtual_angular_gain,
+                ]
+            ),
+            filter_bandwidth=np.array(
+                [
+                    controller_config.command_filter_linear_bandwidth,
+                    controller_config.command_filter_linear_bandwidth,
+                    controller_config.command_filter_linear_bandwidth,
+                    controller_config.command_filter_angular_bandwidth,
+                    controller_config.command_filter_angular_bandwidth,
+                    controller_config.command_filter_angular_bandwidth,
                 ],
                 dtype=float,
             ),
@@ -782,6 +807,27 @@ class LeaderCoreRuntime:
                     controller_config.virtual_linear_speed_limit,
                     controller_config.virtual_angular_speed_limit,
                 ]
+            ),
+            virtual_gain=np.diag(
+                [
+                    controller_config.virtual_linear_gain,
+                    controller_config.virtual_linear_gain,
+                    controller_config.virtual_linear_gain,
+                    controller_config.virtual_angular_gain,
+                    controller_config.virtual_angular_gain,
+                    controller_config.virtual_angular_gain,
+                ]
+            ),
+            filter_bandwidth=np.array(
+                [
+                    controller_config.command_filter_linear_bandwidth,
+                    controller_config.command_filter_linear_bandwidth,
+                    controller_config.command_filter_linear_bandwidth,
+                    controller_config.command_filter_angular_bandwidth,
+                    controller_config.command_filter_angular_bandwidth,
+                    controller_config.command_filter_angular_bandwidth,
+                ],
+                dtype=float,
             ),
             slack_linear_penalty=controller_config.slack_linear_penalty,
             slack_penalty=controller_config.slack_quadratic_penalty,

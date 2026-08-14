@@ -28,6 +28,10 @@ def declare_common_parameters(node: Node) -> None:
     node.declare_parameter("thrust_derating", 1.0)
     node.declare_parameter("virtual_linear_speed_limit", 1.5)
     node.declare_parameter("virtual_angular_speed_limit", 2.0)
+    node.declare_parameter("virtual_linear_gain", 0.55)
+    node.declare_parameter("virtual_angular_gain", 0.80)
+    node.declare_parameter("command_filter_linear_bandwidth", 3.0)
+    node.declare_parameter("command_filter_angular_bandwidth", 4.0)
     node.declare_parameter("slack_linear_penalty", 100.0)
     node.declare_parameter("slack_quadratic_penalty", 5000.0)
     node.declare_parameter("alpha_gain", 0.8)
@@ -56,6 +60,18 @@ def controller_config_from_parameters(node: Node) -> CoreControllerConfig:
         ),
         virtual_angular_speed_limit=float(
             node.get_parameter("virtual_angular_speed_limit").value
+        ),
+        virtual_linear_gain=float(
+            node.get_parameter("virtual_linear_gain").value
+        ),
+        virtual_angular_gain=float(
+            node.get_parameter("virtual_angular_gain").value
+        ),
+        command_filter_linear_bandwidth=float(
+            node.get_parameter("command_filter_linear_bandwidth").value
+        ),
+        command_filter_angular_bandwidth=float(
+            node.get_parameter("command_filter_angular_bandwidth").value
         ),
         slack_linear_penalty=float(
             node.get_parameter("slack_linear_penalty").value
