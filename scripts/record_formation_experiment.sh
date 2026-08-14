@@ -78,6 +78,7 @@ MANIFEST="$RUN_DIR/run_manifest.yaml"
 TOPICS=(
   /clock
   /formation_control/experiment_phase
+  /formation_control/desired_formation
 )
 
 for robot in "${ROBOT_ARRAY[@]}"; do
@@ -88,6 +89,7 @@ for robot in "${ROBOT_ARRAY[@]}"; do
     "${prefix}/fmu/in/vehicle_thrust_setpoint"
     "${prefix}/fmu/in/vehicle_torque_setpoint"
     "${prefix}/formation_control/diagnostic_snapshot"
+    "${prefix}/formation_control/cmd_vel"
 
     # Existing human-readable sensing/controller diagnostics.  The offline
     # exporter continues to use the atomic diagnostic snapshot as its

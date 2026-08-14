@@ -21,29 +21,39 @@ INITIAL_RIGHT = [0.70, -1.80, 0.00]
 FORMATION_NAMES = [
     "triangle_nominal",
     "triangle_wide",
+    "triangle_compact",
     "triangle_high",
 ]
+
+# Each row is the desired parent-minus-follower vector in core NWU.
+#
+# nominal:
+#   left  = [-0.70, -1.80,  0.00]
+#   right = [ 0.70, -1.80,  0.00]
+#
+# wide: visibly larger lateral and longitudinal footprint
+#   left  = [-1.15, -2.30,  0.00]
+#   right = [ 1.15, -2.30,  0.00]
+#
+# compact: visibly smaller footprint
+#   left  = [-0.35, -1.25,  0.00]
+#   right = [ 0.35, -1.25,  0.00]
+#
+# high: nominal horizontal geometry with opposite depth offsets
+#   left  = [-0.70, -1.80,  0.30]
+#   right = [ 0.70, -1.80, -0.30]
 LEFT_FORMATIONS = [
-    -0.70,
-    -1.80,
-    0.00,
-    -0.95,
-    -2.20,
-    0.00,
-    -0.80,
-    -1.90,
-    0.35,
+    -0.70, -1.80,  0.00,
+    -1.15, -2.30,  0.00,
+    -0.35, -1.25,  0.00,
+    -0.70, -1.80,  0.30,
 ]
+
 RIGHT_FORMATIONS = [
-    0.70,
-    -1.80,
-    0.00,
-    0.95,
-    -2.20,
-    0.00,
-    0.80,
-    -1.90,
-    -0.35,
+     0.70, -1.80,  0.00,
+     1.15, -2.30,  0.00,
+     0.35, -1.25,  0.00,
+     0.70, -1.80, -0.30,
 ]
 
 
@@ -88,7 +98,9 @@ def generate_launch_description() -> LaunchDescription:
     dt = LaunchConfiguration("dt")
     dry_run = LaunchConfiguration("dry_run")
     leader_reference_mode = LaunchConfiguration("leader_reference_mode")
-    workspace_barrier_enabled = LaunchConfiguration("workspace_barrier_enabled")
+    workspace_barrier_enabled = LaunchConfiguration(
+        "workspace_barrier_enabled"
+    )
     workspace_adaptive = LaunchConfiguration("workspace_adaptive")
 
     common = {
@@ -163,7 +175,7 @@ def generate_launch_description() -> LaunchDescription:
                         "reference_mode": leader_reference_mode,
                         "experiment_phase_topic": PHASE_TOPIC,
                         "initialization_position": INITIAL_LEADER_POSITION,
-                        "position_gain": 3.0,
+                        "position_gain": 2.0,
                     },
                 ],
             ),
@@ -191,8 +203,8 @@ def generate_launch_description() -> LaunchDescription:
                         "desired_formation_topic": FORMATION_TOPIC,
                         "formation_names": FORMATION_NAMES,
                         "formation_relative_positions": LEFT_FORMATIONS,
+                        "formation_gain": 2.0,
                         "adaptive": True,
-                        "formation_gain": 3.0,
                     },
                 ],
             ),
@@ -220,8 +232,8 @@ def generate_launch_description() -> LaunchDescription:
                         "desired_formation_topic": FORMATION_TOPIC,
                         "formation_names": FORMATION_NAMES,
                         "formation_relative_positions": RIGHT_FORMATIONS,
+                        "formation_gain": 2.0,
                         "adaptive": True,
-                        "formation_gain": 3.0,
                     },
                 ],
             ),
