@@ -59,7 +59,11 @@ from formation_control.visualization.domain_relaxation_plot import (
 PAPER_PLOTS = {
     "trajectory",
     "leader_tracking",
+    "leader_position",
     "formation_error",
+    "formation_tracking",
+    "workspace",
+    "workspace_relaxation",
     "distance",
     "fov",
     "adaptive_fov",
@@ -587,6 +591,327 @@ def _formation_error_figure(data: dict[str, object], paper_quality: bool):
     return figure
 
 
+
+def _leader_position_figure(data: dict[str, object], paper_quality: bool):
+    """Plot actual and desired leader position component by component."""
+    arrays = data["arrays"]
+    graph = data["graph"]
+    times = np.asarray(arrays["times"], dtype=float)
+    root = graph.root
+
+    position = np.asarray(arrays["positions"][:, root], dtype=float)
+    reference = np.asarray(
+        arrays["reference_position"][:, root],
+        dtype=float,
+    )
+    valid = (
+        np.all(np.isfinite(position), axis=1)
+        & np.all(np.isfinite(reference), axis=1)
+        & np.isfinite(times)
+    )
+    if np.count_nonzero(valid) < 2:
+        return None
+
+    apply_visualization_style(paper_quality=paper_quality)
+    figure, axes = plt.subplots(3, 1, sharex=True)
+    labels = ("x", "y", "z")
+
+    for axis_index, axis in enumerate(axes):
+        axis.plot(
+            times[valid],
+            position[valid, axis_index],
+            label="actual",
+        )
+        axis.plot(
+            times[valid],
+            reference[valid, axis_index],
+            "--",
+            label="reference",
+        )
+        axis.set_ylabel(rf"${labels[axis_index]}$ [m]")
+        axis.grid(True, alpha=0.3)
+
+    axes[0].set_title("Leader position tracking")
+    axes[0].legend()
+    axes[-1].set_xlabel(r"$t$ [s]")
+    figure.tight_layout()
+    return figure
+
+
+def _formation_tracking_figures(
+    data: dict[str, object],
+    paper_quality: bool,
+) -> dict[str, plt.Figure]:
+    """Actual versus desired parent-minus-follower vector for each edge."""
+    arrays = data["arrays"]
+    graph = data["graph"]
+    robots = data["robots"]
+    times = np.asarray(arrays["times"], dtype=float)
+    positions = np.asarray(arrays["positions"], dtype=float)
+    desired = np.asarray(
+        arrays["desired_relative_position"],
+        dtype=float,
+    )
+
+    figures: dict[str, plt.Figure] = {}
+    labels = ("x", "y", "z")
+
+    for edge in graph:
+        observer = edge.observer
+        target = edge.target
+        actual = positions[:, target, :] - positions[:, observer, :]
+        reference = desired[:, observer, :]
+
+        valid = (
+            np.all(np.isfinite(actual), axis=1)
+            & np.all(np.isfinite(reference), axis=1)
+            & np.isfinite(times)
+        )
+        if np.count_nonzero(valid) < 2:
+            continue
+
+        apply_visualization_style(paper_quality=paper_quality)
+        figure, axes = plt.subplots(3, 1, sharex=True)
+
+        for axis_index, axis in enumerate(axes):
+            axis.plot(
+                times[valid],
+                actual[valid, axis_index],
+                label="actual",
+            )
+            axis.plot(
+                times[valid],
+                reference[valid, axis_index],
+                "--",
+                label="desired",
+            )
+            axis.set_ylabel(rf"$d_{labels[axis_index]}$ [m]")
+            axis.grid(True, alpha=0.3)
+
+        axes[0].set_title(
+            "Formation tracking: "
+            f"{robots[observer]}->{robots[target]}"
+        )
+        axes[0].legend()
+        axes[-1].set_xlabel(r"$t$ [s]")
+        figure.tight_layout()
+        figures[
+            f"formation_tracking_{robots[observer]}_to_{robots[target]}"
+        ] = figure
+
+    return figures
+
+
+_WORKSPACE_NAMES = (
+    "x_min",
+    "x_max",
+    "y_min",
+    "y_max",
+    "z_min",
+    "z_max",
+)
+
+
+def _workspace_available(arrays: dict[str, np.ndarray]) -> bool:
+    required = (
+        "workspace_relaxation",
+        "workspace_conservative_constraint_values",
+        "workspace_physical_constraint_values",
+    )
+    return all(name in arrays for name in required)
+
+
+def _workspace_bounds(
+    position: np.ndarray,
+    conservative_values: np.ndarray,
+    physical_values: np.ndarray,
+    relaxation: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Recover [lower, upper] wall positions from logged constraint margins.
+
+    Constraint channel order:
+      [x_min, x_max, y_min, y_max, z_min, z_max].
+
+    For each axis h_min = p-lower and h_max = upper-p.  The adaptive
+    constraint margin is reconstructed by interpolating from conservative
+    margin to physical margin using the normalized relaxation state.
+    """
+    n = position.shape[0]
+    conservative_bounds = np.full((n, 3, 2), np.nan)
+    physical_bounds = np.full((n, 3, 2), np.nan)
+    adaptive_bounds = np.full((n, 3, 2), np.nan)
+
+    for axis in range(3):
+        lower_channel = 2 * axis
+        upper_channel = lower_channel + 1
+        p = position[:, axis]
+
+        hc_lower = conservative_values[:, lower_channel]
+        hc_upper = conservative_values[:, upper_channel]
+        hp_lower = physical_values[:, lower_channel]
+        hp_upper = physical_values[:, upper_channel]
+
+        conservative_bounds[:, axis, 0] = p - hc_lower
+        conservative_bounds[:, axis, 1] = p + hc_upper
+        physical_bounds[:, axis, 0] = p - hp_lower
+        physical_bounds[:, axis, 1] = p + hp_upper
+
+        s_lower = relaxation[:, lower_channel]
+        s_upper = relaxation[:, upper_channel]
+        ha_lower = hc_lower + s_lower * (hp_lower - hc_lower)
+        ha_upper = hc_upper + s_upper * (hp_upper - hc_upper)
+        adaptive_bounds[:, axis, 0] = p - ha_lower
+        adaptive_bounds[:, axis, 1] = p + ha_upper
+
+    return conservative_bounds, adaptive_bounds, physical_bounds
+
+
+def _workspace_figures(
+    data: dict[str, object],
+    paper_quality: bool,
+) -> dict[str, plt.Figure]:
+    arrays = data["arrays"]
+    robots = data["robots"]
+    if not _workspace_available(arrays):
+        return {}
+
+    times = np.asarray(arrays["times"], dtype=float)
+    positions = np.asarray(arrays["positions"], dtype=float)
+    relaxation = np.asarray(
+        arrays["workspace_relaxation"],
+        dtype=float,
+    )
+    conservative = np.asarray(
+        arrays["workspace_conservative_constraint_values"],
+        dtype=float,
+    )
+    physical = np.asarray(
+        arrays["workspace_physical_constraint_values"],
+        dtype=float,
+    )
+
+    figures: dict[str, plt.Figure] = {}
+    labels = ("x", "y", "z")
+
+    for agent, robot in enumerate(robots):
+        p = positions[:, agent, :]
+        s = relaxation[:, agent, :]
+        hc = conservative[:, agent, :]
+        hp = physical[:, agent, :]
+
+        valid = (
+            np.all(np.isfinite(p), axis=1)
+            & np.all(np.isfinite(s), axis=1)
+            & np.all(np.isfinite(hc), axis=1)
+            & np.all(np.isfinite(hp), axis=1)
+            & np.isfinite(times)
+        )
+        if np.count_nonzero(valid) < 2:
+            continue
+
+        cons_b, adaptive_b, physical_b = _workspace_bounds(
+            p,
+            hc,
+            hp,
+            s,
+        )
+
+        apply_visualization_style(paper_quality=paper_quality)
+        figure, axes = plt.subplots(3, 1, sharex=True)
+
+        for axis_index, axis in enumerate(axes):
+            axis.plot(
+                times[valid],
+                p[valid, axis_index],
+                label="robot position",
+            )
+            axis.plot(
+                times[valid],
+                cons_b[valid, axis_index, 0],
+                ":",
+                label="conservative bounds" if axis_index == 0 else None,
+            )
+            axis.plot(
+                times[valid],
+                cons_b[valid, axis_index, 1],
+                ":",
+            )
+            axis.plot(
+                times[valid],
+                adaptive_b[valid, axis_index, 0],
+                "--",
+                label="adaptive bounds" if axis_index == 0 else None,
+            )
+            axis.plot(
+                times[valid],
+                adaptive_b[valid, axis_index, 1],
+                "--",
+            )
+            axis.plot(
+                times[valid],
+                physical_b[valid, axis_index, 0],
+                "-.",
+                label="physical bounds" if axis_index == 0 else None,
+            )
+            axis.plot(
+                times[valid],
+                physical_b[valid, axis_index, 1],
+                "-.",
+            )
+            axis.set_ylabel(rf"${labels[axis_index]}$ [m]")
+            axis.grid(True, alpha=0.3)
+
+        axes[0].set_title(f"Workspace constraints: {robot}")
+        axes[0].legend()
+        axes[-1].set_xlabel(r"$t$ [s]")
+        figure.tight_layout()
+        figures[f"workspace_{robot}"] = figure
+
+    return figures
+
+
+def _workspace_relaxation_figures(
+    data: dict[str, object],
+    paper_quality: bool,
+) -> dict[str, plt.Figure]:
+    arrays = data["arrays"]
+    robots = data["robots"]
+    if "workspace_relaxation" not in arrays:
+        return {}
+
+    times = np.asarray(arrays["times"], dtype=float)
+    relaxation = np.asarray(
+        arrays["workspace_relaxation"],
+        dtype=float,
+    )
+    figures: dict[str, plt.Figure] = {}
+
+    for agent, robot in enumerate(robots):
+        values = relaxation[:, agent, :]
+        valid = np.any(np.isfinite(values), axis=1) & np.isfinite(times)
+        if np.count_nonzero(valid) < 2:
+            continue
+
+        apply_visualization_style(paper_quality=paper_quality)
+        figure, axis = plt.subplots()
+        for channel, name in enumerate(_WORKSPACE_NAMES):
+            axis.plot(
+                times[valid],
+                values[valid, channel],
+                label=name,
+            )
+        axis.set_xlabel(r"$t$ [s]")
+        axis.set_ylabel(r"$s_W$")
+        axis.set_ylim(-0.02, 1.02)
+        axis.set_title(f"Workspace relaxation: {robot}")
+        axis.grid(True, alpha=0.3)
+        axis.legend(ncol=2)
+        figure.tight_layout()
+        figures[f"workspace_relaxation_{robot}"] = figure
+
+    return figures
+
+
 def _leader_tracking_figure(data: dict[str, object], paper_quality: bool):
     arrays = data["arrays"]
     graph = data["graph"]
@@ -712,6 +1037,53 @@ def _print_summary(data: dict[str, object]) -> None:
                 f"max {np.max(error_norm):.4f} m"
             )
 
+    if _workspace_available(arrays):
+        workspace_s = np.asarray(
+            arrays["workspace_relaxation"],
+            dtype=float,
+        )
+        workspace_physical = np.asarray(
+            arrays["workspace_physical_constraint_values"],
+            dtype=float,
+        )
+        workspace_margin = np.asarray(
+            arrays.get(
+                "workspace_minimum_physical_margin",
+                np.full((len(times), len(robots)), np.nan),
+            ),
+            dtype=float,
+        )
+        for agent, robot in enumerate(robots):
+            finite_s = workspace_s[:, agent][
+                np.isfinite(workspace_s[:, agent])
+            ]
+            finite_margin = workspace_margin[:, agent][
+                np.isfinite(workspace_margin[:, agent])
+            ]
+            values = workspace_physical[:, agent, :]
+            if np.any(np.isfinite(values)):
+                flat_index = np.nanargmin(values)
+                _, channel = np.unravel_index(
+                    flat_index,
+                    values.shape,
+                )
+                closest_name = _WORKSPACE_NAMES[channel]
+            else:
+                closest_name = "unknown"
+
+            if finite_margin.size or finite_s.size:
+                pieces = [f"Workspace {robot}:"]
+                if finite_margin.size:
+                    pieces.append(
+                        f"min physical margin {np.min(finite_margin):.4f} m"
+                    )
+                if finite_s.size:
+                    pieces.append(
+                        f"max relaxation {np.max(finite_s):.3f}"
+                    )
+                pieces.append(f"closest wall {closest_name}")
+                print(", ".join(pieces))
+
     root = graph.root
     p_ref = np.asarray(arrays["reference_position"][:, root], dtype=float)
     v_ref = np.asarray(arrays["reference_velocity"][:, root], dtype=float)
@@ -775,6 +1147,22 @@ def main() -> None:
     parser.add_argument("--all", action="store_true", help="all available diagnostics")
     parser.add_argument("--trajectory", action="store_true")
     parser.add_argument("--leader-tracking", dest="leader_tracking", action="store_true")
+    parser.add_argument(
+        "--leader-position",
+        dest="leader_position",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--formation-tracking",
+        dest="formation_tracking",
+        action="store_true",
+    )
+    parser.add_argument("--workspace", action="store_true")
+    parser.add_argument(
+        "--workspace-relaxation",
+        dest="workspace_relaxation",
+        action="store_true",
+    )
     parser.add_argument(
         "--formation-error",
         dest="formation_error",
@@ -843,6 +1231,53 @@ def main() -> None:
             print(
                 "Skipping leader-tracking plot: leader reference_position was "
                 "not present in the snapshot."
+            )
+
+    if "leader_position" in selected:
+        figures["leader_position"] = _leader_position_figure(
+            data,
+            args.paper_quality,
+        )
+        if figures["leader_position"] is None:
+            print(
+                "Skipping leader-position plot: leader reference position "
+                "is unavailable."
+            )
+
+    if "formation_tracking" in selected:
+        formation_figures = _formation_tracking_figures(
+            data,
+            args.paper_quality,
+        )
+        figures.update(formation_figures)
+        if not formation_figures:
+            print(
+                "Skipping formation-tracking plots: no finite desired "
+                "relative-position histories were found."
+            )
+
+    if "workspace" in selected:
+        workspace_figures = _workspace_figures(
+            data,
+            args.paper_quality,
+        )
+        figures.update(workspace_figures)
+        if not workspace_figures:
+            print(
+                "Skipping workspace plots: Stage-B workspace diagnostics "
+                "are not present in this NPZ."
+            )
+
+    if "workspace_relaxation" in selected:
+        workspace_relaxation_figures = _workspace_relaxation_figures(
+            data,
+            args.paper_quality,
+        )
+        figures.update(workspace_relaxation_figures)
+        if not workspace_relaxation_figures:
+            print(
+                "Skipping workspace-relaxation plots: Stage-B workspace "
+                "diagnostics are not present in this NPZ."
             )
 
     if "formation_error" in selected:

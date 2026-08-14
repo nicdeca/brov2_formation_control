@@ -252,7 +252,67 @@ class LeaderControllerNode(Node):
             )
             return
 
+        previous_phase = self._experiment_phase
         self._experiment_phase = phase
+
+        # INITIALIZE uses an explicit absolute initialization reference.
+        # Any stationary/velocity reference created earlier may therefore still
+        # point to the original spawn state.  When FORMATION is released,
+        # re-anchor the active leader reference at the ACTUAL current state so
+        # the phase transition itself is reference-continuous.
+        if previous_phase == "INITIALIZE" and phase == "FORMATION":
+            if self._state is None:
+                self.get_logger().warn(
+                    "FORMATION released before a leader state was available; "
+                    "the leader reference could not be reset."
+                )
+            else:
+                current_position = self._state[:3].copy()
+                rotation = rotation_matrix_from_quaternion(
+                    self._state[3:7]
+                )
+                current_velocity = rotation @ self._state[7:10]
+
+                if self.reference_mode == "stationary":
+                    self._stationary_reference = LeaderTrajectorySample(
+                        position=current_position,
+                        velocity=np.zeros(3),
+                        acceleration=np.zeros(3),
+                    )
+                    self.get_logger().info(
+                        "Reset stationary leader reference at FORMATION "
+                        f"transition to {current_position.tolist()}."
+                    )
+
+                elif self.reference_mode == "velocity":
+                    self._velocity_reference = (
+                        VelocityCommandReference.initialize(
+                            current_position,
+                            current_velocity,
+                            float(
+                                self.get_parameter(
+                                    "velocity_command_bandwidth"
+                                ).value
+                            ),
+                        )
+                    )
+                    # Do not allow a command received during INITIALIZE to be
+                    # applied immediately when FORMATION starts.
+                    self._velocity_command = np.zeros(3, dtype=float)
+                    self._velocity_command_receipt = -np.inf
+
+                    # Respect the currently available workspace immediately.
+                    bounds = self.runtime.workspace_reference_bounds()
+                    if bounds is not None:
+                        self._velocity_reference.project_to_box(*bounds)
+
+                    self.get_logger().info(
+                        "Reset leader velocity reference at FORMATION "
+                        "transition from current state: "
+                        f"position={current_position.tolist()}, "
+                        f"velocity={current_velocity.tolist()}."
+                    )
+
         self.get_logger().info(
             f"Experiment phase changed to {self._experiment_phase}."
         )

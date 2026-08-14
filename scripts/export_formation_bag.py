@@ -247,6 +247,24 @@ def _message_xyz(message) -> np.ndarray:
     return np.asarray(value, dtype=float)
 
 
+def _message_scalar(message) -> float:
+    value = getattr(message, "data", np.nan)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return np.nan
+
+
+def _message_vector(message, width: int) -> np.ndarray:
+    value = getattr(message, "data", None)
+    if value is None:
+        return np.full(width, np.nan)
+    array = np.asarray(value, dtype=float).reshape(-1)
+    if array.size != width:
+        return np.full(width, np.nan)
+    return array
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("run_dir", type=Path)
@@ -289,6 +307,44 @@ def main() -> None:
     }
     mode_topics = {
         robot: f"/{robot}/fmu/out/vehicle_control_mode" for robot in robots
+    }
+
+    workspace_enabled_topics = {
+        robot: f"/{robot}/formation_control/workspace_barrier_enabled"
+        for robot in robots
+    }
+    workspace_adaptive_topics = {
+        robot: f"/{robot}/formation_control/workspace_adaptive"
+        for robot in robots
+    }
+    workspace_value_topics = {
+        robot: f"/{robot}/formation_control/workspace_barrier_value"
+        for robot in robots
+    }
+    workspace_relaxation_topics = {
+        robot: f"/{robot}/formation_control/workspace_relaxation"
+        for robot in robots
+    }
+    workspace_conservative_topics = {
+        robot: (
+            f"/{robot}/formation_control/"
+            "workspace_conservative_constraint_values"
+        )
+        for robot in robots
+    }
+    workspace_physical_topics = {
+        robot: (
+            f"/{robot}/formation_control/"
+            "workspace_physical_constraint_values"
+        )
+        for robot in robots
+    }
+    workspace_margin_topics = {
+        robot: (
+            f"/{robot}/formation_control/"
+            "workspace_minimum_physical_margin"
+        )
+        for robot in robots
     }
 
     reference_robot = args.reference_robot
@@ -347,6 +403,23 @@ def main() -> None:
     px4_torque_setpoint = np.full((n_samples, n_agents, 3), np.nan)
     px4_armed = np.full((n_samples, n_agents), np.nan)
     px4_offboard_enabled = np.full((n_samples, n_agents), np.nan)
+
+    workspace_barrier_enabled = np.full((n_samples, n_agents), np.nan)
+    workspace_adaptive = np.full((n_samples, n_agents), np.nan)
+    workspace_barrier_value = np.full((n_samples, n_agents), np.nan)
+    workspace_relaxation = np.full((n_samples, n_agents, 6), np.nan)
+    workspace_conservative_constraint_values = np.full(
+        (n_samples, n_agents, 6),
+        np.nan,
+    )
+    workspace_physical_constraint_values = np.full(
+        (n_samples, n_agents, 6),
+        np.nan,
+    )
+    workspace_minimum_physical_margin = np.full(
+        (n_samples, n_agents),
+        np.nan,
+    )
 
     snapshot_fields = [name for name in FIELD_WIDTHS if name != "schema_version"]
     snapshots = {
@@ -414,6 +487,45 @@ def main() -> None:
                         )
                     )
 
+            workspace_scalar_series = (
+                (workspace_enabled_topics[robot], workspace_barrier_enabled),
+                (workspace_adaptive_topics[robot], workspace_adaptive),
+                (workspace_value_topics[robot], workspace_barrier_value),
+                (
+                    workspace_margin_topics[robot],
+                    workspace_minimum_physical_margin,
+                ),
+            )
+            for topic, destination in workspace_scalar_series:
+                series = bag.get(topic)
+                if series is None:
+                    continue
+                message = series.nearest(bag_stamp, max_delta_ns)
+                if message is not None:
+                    destination[step, agent] = _message_scalar(message)
+
+            workspace_vector_series = (
+                (
+                    workspace_relaxation_topics[robot],
+                    workspace_relaxation,
+                ),
+                (
+                    workspace_conservative_topics[robot],
+                    workspace_conservative_constraint_values,
+                ),
+                (
+                    workspace_physical_topics[robot],
+                    workspace_physical_constraint_values,
+                ),
+            )
+            for topic, destination in workspace_vector_series:
+                series = bag.get(topic)
+                if series is None:
+                    continue
+                message = series.nearest(bag_stamp, max_delta_ns)
+                if message is not None:
+                    destination[step, agent] = _message_vector(message, 6)
+
     # Prefer PX4's simulation/sample clock. Fall back to rosbag receive time if
     # PX4 timestamps are unavailable or non-monotone.
     if np.all(np.isfinite(reference_px4_times)) and np.all(
@@ -437,6 +549,19 @@ def main() -> None:
         "px4_torque_setpoint": px4_torque_setpoint,
         "px4_armed": px4_armed,
         "px4_offboard_enabled": px4_offboard_enabled,
+        "workspace_barrier_enabled": workspace_barrier_enabled,
+        "workspace_adaptive": workspace_adaptive,
+        "workspace_barrier_value": workspace_barrier_value,
+        "workspace_relaxation": workspace_relaxation,
+        "workspace_conservative_constraint_values": (
+            workspace_conservative_constraint_values
+        ),
+        "workspace_physical_constraint_values": (
+            workspace_physical_constraint_values
+        ),
+        "workspace_minimum_physical_margin": (
+            workspace_minimum_physical_margin
+        ),
         **snapshots,
     }
     metadata = {

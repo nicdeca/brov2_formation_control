@@ -27,23 +27,23 @@ LEFT_FORMATIONS = [
     -0.70,
     -1.80,
     0.00,
-    -0.95,
-    -2.20,
+    -0.90,
+    -2.10,
     0.00,
-    -0.80,
-    -1.90,
-    0.35,
+    -0.70,
+    -1.80,
+    0.25,
 ]
 RIGHT_FORMATIONS = [
     0.70,
     -1.80,
     0.00,
-    0.95,
-    -2.20,
+    0.90,
+    -2.10,
     0.00,
-    0.80,
-    -1.90,
-    -0.35,
+    0.70,
+    -1.80,
+    -0.25,
 ]
 
 
@@ -88,7 +88,9 @@ def generate_launch_description() -> LaunchDescription:
     dt = LaunchConfiguration("dt")
     dry_run = LaunchConfiguration("dry_run")
     leader_reference_mode = LaunchConfiguration("leader_reference_mode")
-    workspace_barrier_enabled = LaunchConfiguration("workspace_barrier_enabled")
+    workspace_barrier_enabled = LaunchConfiguration(
+        "workspace_barrier_enabled"
+    )
     workspace_adaptive = LaunchConfiguration("workspace_adaptive")
 
     common = {
@@ -163,7 +165,6 @@ def generate_launch_description() -> LaunchDescription:
                         "reference_mode": leader_reference_mode,
                         "experiment_phase_topic": PHASE_TOPIC,
                         "initialization_position": INITIAL_LEADER_POSITION,
-                        "position_gain": 3.0,
                     },
                 ],
             ),
@@ -192,7 +193,6 @@ def generate_launch_description() -> LaunchDescription:
                         "formation_names": FORMATION_NAMES,
                         "formation_relative_positions": LEFT_FORMATIONS,
                         "adaptive": True,
-                        "formation_gain": 3.0,
                     },
                 ],
             ),
@@ -221,7 +221,6 @@ def generate_launch_description() -> LaunchDescription:
                         "formation_names": FORMATION_NAMES,
                         "formation_relative_positions": RIGHT_FORMATIONS,
                         "adaptive": True,
-                        "formation_gain": 3.0,
                     },
                 ],
             ),
