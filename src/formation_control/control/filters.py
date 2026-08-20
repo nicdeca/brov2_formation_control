@@ -191,4 +191,4 @@ class SecondOrderCommandFilter(ContinuousTimeModel):
         )
 
 
-type CommandFilter = FirstOrderCommandFilter | SecondOrderCommandFilter
+CommandFilter = FirstOrderCommandFilter | SecondOrderCommandFilter

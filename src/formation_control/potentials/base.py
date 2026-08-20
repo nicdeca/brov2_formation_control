@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Generic, Protocol, TypeVar
 
 import numpy as np
 from numpy.typing import NDArray
 
 FloatArray = NDArray[np.float64]
+
+StateT = TypeVar("StateT")
 
 
 @dataclass(frozen=True)
@@ -30,7 +32,7 @@ class PotentialEvaluation:
         object.__setattr__(self, "gradient", gradient)
 
 
-class EuclideanPotential[StateT](Protocol):
+class EuclideanPotential(Protocol[StateT]):
     """Protocol for differentiable potentials over Euclidean variables."""
 
     def evaluate(self, state: StateT) -> PotentialEvaluation:
@@ -38,7 +40,7 @@ class EuclideanPotential[StateT](Protocol):
 
 
 @dataclass(frozen=True)
-class WeightedPotential[StateT]:
+class WeightedPotential(Generic[StateT]):
     """Positive scalar weighting of another potential."""
 
     potential: EuclideanPotential[StateT]
@@ -57,7 +59,7 @@ class WeightedPotential[StateT]:
 
 
 @dataclass(frozen=True)
-class SumPotential[StateT]:
+class SumPotential(Generic[StateT]):
     """Sum of potentials defined over the same Euclidean variable."""
 
     terms: Sequence[EuclideanPotential[StateT]]

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Generic, Protocol, TypeVar
 
 import numpy as np
 
@@ -12,8 +12,10 @@ from formation_control.constraints import ConstraintEvaluation
 from .barriers import RecenteredLogBarrier
 from .base import FloatArray, PotentialEvaluation
 
+StateT = TypeVar("StateT")
 
-class DifferentiableConstraint[StateT](Protocol):
+
+class DifferentiableConstraint(Protocol[StateT]):
     """Constraint exposing scalar value and Euclidean gradient."""
 
     def evaluate(self, state: StateT) -> ConstraintEvaluation:
@@ -48,7 +50,7 @@ class AdaptiveBarrierEvaluation:
 
 
 @dataclass(frozen=True)
-class AdaptiveConstraintBarrierPotential[StateT]:
+class AdaptiveConstraintBarrierPotential(Generic[StateT]):
     """Barrier for ``h_a(state, rho) = h_c(state) + rho``.
 
     The reference constraint value is enlarged by the same ``rho``:
@@ -123,7 +125,7 @@ class AdaptiveConstraintBarrierPotential[StateT]:
 
 
 @dataclass(frozen=True)
-class BoundAdaptiveConstraintBarrierPotential[StateT]:
+class BoundAdaptiveConstraintBarrierPotential(Generic[StateT]):
     """Adaptive barrier with a frozen enlargement parameter."""
 
     potential: AdaptiveConstraintBarrierPotential[StateT]

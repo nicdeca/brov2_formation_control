@@ -13,7 +13,7 @@ there, and diverges as ``h -> 0+``.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Generic, Protocol, TypeVar
 
 import numpy as np
 
@@ -21,8 +21,10 @@ from formation_control.constraints import ConstraintEvaluation
 
 from .base import PotentialEvaluation
 
+StateT = TypeVar("StateT")
 
-class DifferentiableConstraint[StateT](Protocol):
+
+class DifferentiableConstraint(Protocol[StateT]):
     """Constraint exposing both scalar value and Euclidean gradient."""
 
     def evaluate(self, state: StateT) -> ConstraintEvaluation:
@@ -56,7 +58,7 @@ class RecenteredLogBarrier:
 
 
 @dataclass(frozen=True)
-class ConstraintBarrierPotential[StateT]:
+class ConstraintBarrierPotential(Generic[StateT]):
     """Compose a differentiable scalar constraint with a recentered barrier."""
 
     constraint: DifferentiableConstraint[StateT]

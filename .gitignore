@@ -90,6 +90,9 @@ animations/generated/
 build/
 install/
 log/
+ros2/build
+ros2/log
+ros2/install
 
 # -----------------------------------------------------------------------------
 # Miscellaneous

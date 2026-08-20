@@ -28,7 +28,7 @@ from .wrench_space import (
     minimum_effort_allocation_matrix,
 )
 
-type BlueROV2ControlSpace = Literal["thruster", "wrench"]
+BlueROV2ControlSpace = Literal["thruster", "wrench"]
 
 
 def _default_virtual_gain() -> FloatArray:

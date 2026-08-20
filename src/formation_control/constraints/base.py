@@ -12,14 +12,17 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Generic, TypeVar
 
 import numpy as np
 from numpy.typing import NDArray
 
 FloatArray = NDArray[np.float64]
 
+StateT = TypeVar("StateT")
 
-class ScalarConstraint[StateT](ABC):
+
+class ScalarConstraint(Generic[StateT], ABC):
     """Interface for a scalar strict inequality ``h(z) > 0``."""
 
     @abstractmethod
