@@ -1,4 +1,4 @@
-"""Instantaneous kinematics of the conservative sensing constraints."""
+"""Instantaneous values and kinematics of the conservative sensing constraints."""
 
 from __future__ import annotations
 
@@ -11,6 +11,41 @@ from formation_control.models import BlueROV2Model
 from formation_control.models.base import FloatArray
 
 from .domains import DistanceDomain, FieldOfViewDomain
+
+
+@dataclass(frozen=True)
+class SensingConstraintValues:
+    """Values of the four conservative sensing constraints.
+
+    Channel order is
+
+        [collision, range, horizontal_fov, vertical_fov].
+
+    This configuration-only object intentionally contains no constraint rates,
+    so it can be evaluated without the target velocity.
+    """
+
+    values: FloatArray
+    image_coordinates: FloatArray
+    camera_depth: float
+
+    def __post_init__(self) -> None:
+        values = np.asarray(self.values, dtype=float)
+        if values.shape != (4,):
+            raise ValueError("values must have shape (4,).")
+        if not np.all(np.isfinite(values)):
+            raise ValueError("values must contain only finite values.")
+        object.__setattr__(self, "values", values.copy())
+
+        image = np.asarray(self.image_coordinates, dtype=float)
+        if image.shape != (2,):
+            raise ValueError("image_coordinates must have shape (2,).")
+        if not np.all(np.isfinite(image)):
+            raise ValueError("image_coordinates must contain only finite values.")
+        object.__setattr__(self, "image_coordinates", image.copy())
+
+        if not np.isfinite(self.camera_depth):
+            raise ValueError("camera_depth must be finite.")
 
 
 @dataclass(frozen=True)
@@ -42,6 +77,67 @@ class SensingConstraintKinematics:
             raise ValueError("camera_depth must be finite.")
 
 
+def evaluate_sensing_constraint_values(
+    camera: PinholeCamera,
+    distance_domain: DistanceDomain,
+    fov_domain: FieldOfViewDomain,
+    observer_state: FloatArray,
+    target_position: FloatArray,
+) -> SensingConstraintValues:
+    """Evaluate the conservative sensing constraints from configuration only.
+
+    The observer pose and target position are sufficient because the four
+    constraints depend only on relative configuration.  In particular, the
+    target velocity is not required.
+    """
+    observer = np.asarray(observer_state, dtype=float)
+    if observer.ndim != 1 or observer.size < 7:
+        raise ValueError(
+            "observer_state must be one-dimensional and contain at least "
+            "position and quaternion entries."
+        )
+    if not np.all(np.isfinite(observer[:7])):
+        raise ValueError(
+            "observer position and quaternion must contain only finite values."
+        )
+
+    target = np.asarray(target_position, dtype=float)
+    if target.shape != (3,):
+        raise ValueError("target_position must have shape (3,).")
+    if not np.all(np.isfinite(target)):
+        raise ValueError("target_position must contain only finite values.")
+
+    observer_position = observer[:3]
+    observer_quaternion = observer[3:7]
+    observer_rotation = rotation_matrix_from_quaternion(observer_quaternion)
+
+    relative_position = target - observer_position
+    distance_squared = float(relative_position @ relative_position)
+
+    observation = camera.observe(
+        observer_position,
+        observer_rotation,
+        target,
+    )
+    image = observation.image_point.as_array()
+
+    values = np.array(
+        [
+            distance_squared - distance_domain.d_min_conservative**2,
+            distance_domain.d_max_conservative**2 - distance_squared,
+            fov_domain.alpha_h_conservative**2 - image[0] ** 2,
+            fov_domain.alpha_v_conservative**2 - image[1] ** 2,
+        ],
+        dtype=float,
+    )
+
+    return SensingConstraintValues(
+        values=values,
+        image_coordinates=image,
+        camera_depth=float(observation.point_camera[0]),
+    )
+
+
 def evaluate_sensing_constraint_kinematics(
     model: BlueROV2Model,
     camera: PinholeCamera,
@@ -54,11 +150,15 @@ def evaluate_sensing_constraint_kinematics(
 
     Since the constraints depend only on configuration, their first derivative
     depends on the measured generalized velocities but not on the thruster
-    forces.  The resulting quantities can therefore be used as coefficients in
-    the same CLF-QP without creating an algebraic loop.
+    forces.  This derivative-based evaluator is retained for diagnostics and
+    code paths that explicitly have access to both vehicle velocities.
     """
-    observer_position, observer_quaternion, observer_velocity = model.split_state(observer_state)
-    target_position, target_quaternion, target_velocity = model.split_state(target_state)
+    observer_position, observer_quaternion, observer_velocity = model.split_state(
+        observer_state
+    )
+    target_position, target_quaternion, target_velocity = model.split_state(
+        target_state
+    )
 
     observer_rotation = rotation_matrix_from_quaternion(observer_quaternion)
     target_rotation = rotation_matrix_from_quaternion(target_quaternion)

@@ -11,7 +11,6 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 
-
 MAX_ROBOTS = 6
 
 
@@ -41,16 +40,16 @@ DEFAULT_POSES = [
     "-1.15,-2.20,-95.70,0,0,0",  # itrl_rov_1
     "-2.65,-1.55,-95.70,0,0,0",  # itrl_rov_2
     "-3.25,-2.85,-95.70,0,0,0",  # itrl_rov_3
-    "-3.80,-1.20,-95.70,0,0,0",
-    "-3.80,-3.50,-95.70,0,0,0",
-    "-4.40,-2.35,-95.70,0,0,0",
+    "-3.80,-1.20,-95.70,0,0,0",  # itrl_rov_4
+    "-4.25,-2.70,-95.70,0,0,0",  # itrl_rov_5
+    "-4.40,-2.35,-95.70,0,0,0",  # itrl_rov_6
 ]
 
 
 def _launch_setup(context, *args, **kwargs):
-    px4_dir = Path(
-        LaunchConfiguration("px4_dir").perform(context)
-    ).expanduser().resolve()
+    px4_dir = (
+        Path(LaunchConfiguration("px4_dir").perform(context)).expanduser().resolve()
+    )
     px4_binary = px4_dir / "build" / "px4_sitl_uuv" / "bin" / "px4"
 
     if not px4_dir.is_dir():
@@ -64,18 +63,14 @@ def _launch_setup(context, *args, **kwargs):
             f"Build with: cd {px4_dir} && make px4_sitl_uuv"
         )
 
-    robot_count = int(
-        LaunchConfiguration("robot_count").perform(context)
-    )
+    robot_count = int(LaunchConfiguration("robot_count").perform(context))
     if not 1 <= robot_count <= MAX_ROBOTS:
         raise RuntimeError(
             f"robot_count must lie in [1, {MAX_ROBOTS}], got {robot_count}."
         )
 
     world = LaunchConfiguration("world").perform(context)
-    spawn_delay = float(
-        LaunchConfiguration("spawn_delay").perform(context)
-    )
+    spawn_delay = float(LaunchConfiguration("spawn_delay").perform(context))
     if spawn_delay < 0.0:
         raise RuntimeError("spawn_delay must be nonnegative.")
 
@@ -83,14 +78,11 @@ def _launch_setup(context, *args, **kwargs):
     for index in range(robot_count):
         instance = index
         namespace = f"itrl_rov_{index + 1}"
-        pose = LaunchConfiguration(
-            f"rov_{index + 1}_pose"
-        ).perform(context)
+        pose = LaunchConfiguration(f"rov_{index + 1}_pose").perform(context)
         delay = spawn_delay * index
 
         command = (
-            f"sleep {delay} && "
-            f"exec {shlex.quote(str(px4_binary))} -i {instance}"
+            f"sleep {delay} && " f"exec {shlex.quote(str(px4_binary))} -i {instance}"
         )
 
         vehicle_env = {
@@ -150,8 +142,7 @@ def generate_launch_description() -> LaunchDescription:
                 f"rov_{index + 1}_pose",
                 default_value=DEFAULT_POSES[index],
                 description=(
-                    f"Gazebo ENU pose of itrl_rov_{index + 1}: "
-                    "x,y,z,roll,pitch,yaw."
+                    f"Gazebo ENU pose of itrl_rov_{index + 1}: " "x,y,z,roll,pitch,yaw."
                 ),
             )
         )
