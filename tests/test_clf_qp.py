@@ -180,3 +180,66 @@ def test_polyhedral_control_constraint_is_respected():
 
     assert control_set.contains(result.control, tolerance=1e-5)
     assert result.clf_residual <= 3e-4
+
+
+def test_custom_backstepping_constraint_uses_supplied_drift_and_dissipation():
+    clf = make_clf_evaluation(
+        value=3.0,
+        drift=7.0,
+        control_gradient=np.array([2.0, -1.0]),
+    )
+    qp = CLFQP(
+        control_weight=np.diag([2.0, 4.0]),
+        slack_penalty=100.0,
+        alpha=LinearClassK(gain=9.0),  # deliberately unrelated
+        control_set=PolyhedralControlSet.box(
+            np.array([-5.0, -5.0]),
+            np.array([5.0, 5.0]),
+        ),
+    )
+
+    reference = np.array([0.4, -0.2])
+    problem = qp.build_problem(
+        clf,
+        control_reference=reference,
+        constraint_drift=0.75,
+        dissipation_rate=1.25,
+    )
+
+    # 0.75 + [2,-1] u <= -1.25 + delta
+    # -> [2,-1,-1] z <= -2.0.
+    np.testing.assert_allclose(
+        problem.inequality_matrix[0],
+        np.array([2.0, -1.0, -1.0]),
+    )
+    assert problem.inequality_bound[0] == pytest.approx(-2.0)
+    np.testing.assert_allclose(
+        problem.linear_cost[:2],
+        -(qp.control_weight @ reference),
+    )
+
+
+def test_direct_solver_reference_is_centered_at_nonzero_input():
+    clf = make_clf_evaluation(
+        value=1.0,
+        drift=4.0,
+        control_gradient=np.array([0.0]),
+    )
+    qp = CLFQP.isotropic(
+        control_dim=1,
+        control_weight=2.0,
+        slack_penalty=100.0,
+        alpha=LinearClassK(gain=1.0),
+        control_set=PolyhedralControlSet.box(-5.0, 5.0, dimension=1),
+    )
+
+    result = qp.solve(
+        clf,
+        control_reference=np.array([1.7]),
+        constraint_drift=0.0,
+        dissipation_rate=0.0,
+    )
+
+    assert result.control[0] == pytest.approx(1.7)
+    assert result.slack == pytest.approx(0.0)
+    assert result.clf_residual <= 1e-10

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 import numpy as np
@@ -108,8 +108,22 @@ def build_bluerov2_controller_design(
     slack_penalty: float = 5e3,
     slack_linear_penalty: float = 100.0,
     alpha_gain: float = 0.8,
+    velocity_error_gain: float | FloatArray | None = None,
+    trim_activation_on: float = 0.5,
+    trim_activation_off: float = 2.0,
+    trim_allocation_tolerance: float = 1e-5,
 ) -> BlueROV2ControllerDesign:
-    """Build the canonical Heavy controller in thruster or wrench coordinates."""
+    """Build the canonical Heavy controller in thruster or wrench coordinates.
+
+    ``alpha_gain`` is retained as the scalar default for backward-compatible
+    configuration.  In the updated backstepping QP it is interpreted as an
+    inverse-time velocity-error decay gain and sets
+    ``K_e = alpha_gain * M`` unless ``velocity_error_gain`` is supplied.
+
+    The trim allocator uses only the hydrostatic restoring wrench.  In
+    thruster coordinates it first tries the weighted minimum-effort exact
+    allocation and falls back to bounded least squares only if required.
+    """
     if control_space not in ("thruster", "wrench"):
         raise ValueError("control_space must be 'thruster' or 'wrench'.")
 
@@ -119,6 +133,32 @@ def build_bluerov2_controller_design(
         virtual_velocity_norm_limits = _default_virtual_velocity_norm_limits()
     if filter_bandwidth is None:
         filter_bandwidth = _default_filter_bandwidth()
+
+    if velocity_error_gain is None:
+        # K_e is a damping-like generalized-wrench / generalized-velocity
+        # gain in
+        #
+        #     e_nu.T K_e e_nu.
+        #
+        # Using alpha_gain * I (the first compatibility implementation) is
+        # dimensionally inconsistent with the marine backstepping dynamics
+        # and makes the translational error damping much too weak.  Scale the
+        # inertia instead:
+        #
+        #     K_e = k_e M.
+        #
+        # Then alpha_gain has units 1/s and directly sets the decay rate of
+        # the kinetic velocity-error energy.
+        velocity_error_gain_matrix = float(alpha_gain) * model.mass_matrix
+    else:
+        gain_array = np.asarray(velocity_error_gain, dtype=float)
+        if gain_array.ndim == 0:
+            velocity_error_gain_matrix = float(gain_array) * np.eye(6)
+        else:
+            velocity_error_gain_matrix = gain_array
+
+    if not np.isfinite(trim_allocation_tolerance) or trim_allocation_tolerance <= 0.0:
+        raise ValueError("trim_allocation_tolerance must be finite and positive.")
 
     force_scale = max(
         allocation.configuration.force_limits.forward,
@@ -135,6 +175,21 @@ def build_bluerov2_controller_design(
         allocation.matrix,
         thruster_weight,
     )
+
+    def thruster_trim_allocator(wrench: FloatArray) -> FloatArray | None:
+        """Return an exact admissible trim allocation when one is available."""
+        wrench = np.asarray(wrench, dtype=float)
+        forces = minimum_effort_map @ wrench
+        if allocation.contains(forces, tolerance=1e-8):
+            return forces
+
+        bounded = allocation.bounded_least_squares(wrench)
+        if bounded.residual_norm <= trim_allocation_tolerance:
+            return bounded.forces
+        return None
+
+    def wrench_trim_allocator(wrench: FloatArray) -> FloatArray:
+        return np.asarray(wrench, dtype=float).copy()
 
     command_filter = FirstOrderCommandFilter(
         signal_dim=6,
@@ -165,9 +220,13 @@ def build_bluerov2_controller_design(
                     allocation.upper_bounds,
                 ),
             ),
+            velocity_error_gain=velocity_error_gain_matrix,
+            trim_control_allocator=thruster_trim_allocator,
+            trim_activation_on=trim_activation_on,
+            trim_activation_off=trim_activation_off,
         )
     else:
-        dynamics_controller = build_wrench_space_controller(
+        base_controller = build_wrench_space_controller(
             inertia=model.mass_matrix,
             virtual_gain=np.asarray(virtual_gain, dtype=float),
             command_filter=command_filter,
@@ -182,6 +241,13 @@ def build_bluerov2_controller_design(
             slack_linear_penalty=slack_linear_penalty,
             alpha=alpha,
         ).controller
+        dynamics_controller = replace(
+            base_controller,
+            velocity_error_gain=velocity_error_gain_matrix,
+            trim_control_allocator=wrench_trim_allocator,
+            trim_activation_on=trim_activation_on,
+            trim_activation_off=trim_activation_off,
+        )
 
     return BlueROV2ControllerDesign(
         control_space=control_space,

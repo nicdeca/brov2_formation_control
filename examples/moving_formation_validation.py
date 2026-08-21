@@ -1000,7 +1000,7 @@ def simulate(
                 dt,
             )
             next_states[observer] = plant_integrator.step(
-                model,
+                plant_model,
                 states[observer],
                 evaluation.wrench_body,
                 dt,

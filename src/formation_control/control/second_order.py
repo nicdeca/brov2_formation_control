@@ -1,27 +1,34 @@
 """Reusable second-order command-filtered CLF-QP controller.
 
-This module contains the model-independent dynamic-control layer.  It assumes
+This module implements the command-filtered backstepping dynamic-control layer
+for
 
     M nu_dot + h = B u,
 
-with constant positive-definite ``M``.  Configuration geometry and potentials
-are evaluated outside this class and supplied through the scalar potential
-value and its generalized gradient.
+with constant positive-definite ``M``.  The updated paper inequality is
 
-The controller performs, in order,
+    a_c + b.T u <= -e_nu.T K_e e_nu + delta,
 
-1. virtual generalized-velocity generation,
-2. command-filter evaluation,
-3. composite backstepping-CLF evaluation,
-4. CLF-QP solution.
+where
 
-All dynamic controller states remain external.  In particular, evaluating the
-controller never advances the command filter, which prevents accidental
-multiple filter updates within one control cycle.
+    e_nu = nu - nu_c,
+    a_c  = e_nu.T (zeta - h - M nu_c_dot),
+    b    = B.T e_nu
+
+(up to any explicitly supplied control-gradient offset).
+
+The complete modeled CLF derivative is still retained for diagnostics.  The QP
+therefore enforces the paper's backstepping dissipation condition without
+canceling the full marine drift.
+
+An optional trim allocator can provide a control satisfying the stationary
+restoring wrench.  Its reference is activated smoothly only as the local CLF
+input direction approaches zero.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -93,6 +100,21 @@ def _positive_definite_matrix(
     return matrix
 
 
+def _descending_quintic_activation(
+    value: float,
+    *,
+    on: float,
+    off: float,
+) -> float:
+    """C2 activation equal to one near zero and zero above ``off``."""
+    if value <= on:
+        return 1.0
+    if value >= off:
+        return 0.0
+    xi = (off - value) / (off - on)
+    return float(6.0 * xi**5 - 15.0 * xi**4 + 10.0 * xi**3)
+
+
 @dataclass(frozen=True)
 class SecondOrderControllerEvaluation:
     """Complete result of one controller evaluation."""
@@ -103,6 +125,12 @@ class SecondOrderControllerEvaluation:
     filter: CommandFilterEvaluation
     clf: BacksteppingCLFEvaluation
     qp: CLFQPResult
+    constraint_drift: float
+    dissipation_rate: float
+    control_reference: FloatArray
+    trim_reference: FloatArray
+    trim_activation: float
+    trim_metric: float
 
     def __post_init__(self) -> None:
         desired_velocity = np.asarray(self.desired_velocity, dtype=float)
@@ -110,13 +138,29 @@ class SecondOrderControllerEvaluation:
             self.unlimited_desired_velocity,
             dtype=float,
         )
+        filter_command = np.asarray(self.filter_command, dtype=float)
+        control_reference = np.asarray(self.control_reference, dtype=float)
+        trim_reference = np.asarray(self.trim_reference, dtype=float)
+
         if desired_velocity.ndim != 1:
             raise ValueError("desired_velocity must be one-dimensional.")
-        filter_command = np.asarray(self.filter_command, dtype=float)
         if unlimited_desired_velocity.shape != desired_velocity.shape:
             raise ValueError("unlimited_desired_velocity must match desired_velocity shape.")
         if filter_command.shape != desired_velocity.shape:
             raise ValueError("filter_command must match desired_velocity shape.")
+        if control_reference.shape != self.qp.control.shape:
+            raise ValueError("control_reference must match optimized-control shape.")
+        if trim_reference.shape != self.qp.control.shape:
+            raise ValueError("trim_reference must match optimized-control shape.")
+        if not np.isfinite(self.constraint_drift):
+            raise ValueError("constraint_drift must be finite.")
+        if not np.isfinite(self.dissipation_rate) or self.dissipation_rate < -1e-12:
+            raise ValueError("dissipation_rate must be finite and nonnegative.")
+        if not np.isfinite(self.trim_activation) or not 0.0 <= self.trim_activation <= 1.0:
+            raise ValueError("trim_activation must lie in [0, 1].")
+        if not np.isfinite(self.trim_metric) or self.trim_metric < 0.0:
+            raise ValueError("trim_metric must be finite and nonnegative.")
+
         object.__setattr__(self, "desired_velocity", desired_velocity)
         object.__setattr__(
             self,
@@ -124,6 +168,8 @@ class SecondOrderControllerEvaluation:
             unlimited_desired_velocity,
         )
         object.__setattr__(self, "filter_command", filter_command)
+        object.__setattr__(self, "control_reference", control_reference)
+        object.__setattr__(self, "trim_reference", trim_reference)
 
     @property
     def control(self) -> FloatArray:
@@ -175,6 +221,18 @@ class SecondOrderCLFQPController:
         a thruster-force vector.
     qp:
         Soft CLF-QP operating on the control coordinates exposed by ``clf``.
+    velocity_error_gain:
+        Positive-definite matrix ``K_e`` in the paper inequality.  If omitted,
+        the controller retains the legacy generic ``-alpha(W)`` QP condition;
+        the canonical BlueROV2 design always supplies ``K_e``.
+    trim_control_allocator:
+        Optional map from a desired body restoring wrench to an admissible
+        optimized-input vector.  It is called only when trim activation is
+        nonzero.
+    trim_activation_on, trim_activation_off:
+        Thresholds for the metric
+        ``sqrt(b.T @ H^{-1} @ b)``.  Trim is fully active below ``on``, fully
+        inactive above ``off``, and connected by a C2 quintic smoothstep.
     """
 
     virtual_gain: FloatArray
@@ -183,6 +241,10 @@ class SecondOrderCLFQPController:
     qp: CLFQP
     virtual_velocity_norm_limits: FloatArray | None = None
     virtual_velocity_group_sizes: tuple[int, ...] | None = None
+    velocity_error_gain: FloatArray | None = None
+    trim_control_allocator: Callable[[FloatArray], FloatArray | None] | None = None
+    trim_activation_on: float = 0.5
+    trim_activation_off: float = 2.0
 
     def __post_init__(self) -> None:
         dimension = self.clf.velocity_dim
@@ -196,6 +258,24 @@ class SecondOrderCLFQPController:
             raise ValueError("command-filter signal dimension must match CLF velocity dimension.")
         if self.qp.control_dim != self.clf.input_dim:
             raise ValueError("QP control dimension must match the CLF input dimension.")
+
+        velocity_error_gain = self.velocity_error_gain
+        if velocity_error_gain is not None:
+            velocity_error_gain = _positive_definite_matrix(
+                velocity_error_gain,
+                dimension,
+                name="velocity_error_gain",
+            )
+
+        if self.trim_control_allocator is not None and not callable(self.trim_control_allocator):
+            raise ValueError("trim_control_allocator must be callable or None.")
+
+        if not np.isfinite(self.trim_activation_on) or self.trim_activation_on < 0.0:
+            raise ValueError("trim_activation_on must be finite and nonnegative.")
+        if not np.isfinite(self.trim_activation_off):
+            raise ValueError("trim_activation_off must be finite.")
+        if self.trim_activation_off <= self.trim_activation_on:
+            raise ValueError("trim_activation_off must be greater than trim_activation_on.")
 
         norm_limits = self.virtual_velocity_norm_limits
         group_sizes = self.virtual_velocity_group_sizes
@@ -247,6 +327,11 @@ class SecondOrderCLFQPController:
             self,
             "virtual_velocity_group_sizes",
             group_sizes,
+        )
+        object.__setattr__(
+            self,
+            "velocity_error_gain",
+            velocity_error_gain,
         )
 
     @property
@@ -356,6 +441,257 @@ class SecondOrderCLFQPController:
         )
         return self.command_filter.initialize(feedback_command)
 
+    def _paper_constraint_terms(
+        self,
+        *,
+        clf_evaluation: BacksteppingCLFEvaluation,
+        configuration_gradient: FloatArray,
+        dynamics_bias: FloatArray,
+        filtered_velocity_derivative: FloatArray,
+    ) -> tuple[float, float]:
+        """Return ``(a_c, e_nu.T K_e e_nu)`` from the paper formulation."""
+        error = np.asarray(clf_evaluation.velocity_error, dtype=float)
+        gradient = _vector(
+            configuration_gradient,
+            self.velocity_dim,
+            name="configuration_gradient",
+        )
+        bias = _vector(
+            dynamics_bias,
+            self.velocity_dim,
+            name="dynamics_bias",
+        )
+        filtered_derivative = _vector(
+            filtered_velocity_derivative,
+            self.velocity_dim,
+            name="filtered_velocity_derivative",
+        )
+
+        constraint_drift = float(
+            error
+            @ (
+                gradient
+                - bias
+                - self.clf.inertia @ filtered_derivative
+            )
+        )
+        if self.velocity_error_gain is None:
+            raise RuntimeError(
+                "paper constraint terms require velocity_error_gain."
+            )
+        dissipation_rate = float(
+            error @ self.velocity_error_gain @ error
+        )
+        return constraint_drift, max(dissipation_rate, 0.0)
+
+    def _trim_metric(
+        self,
+        clf_evaluation: BacksteppingCLFEvaluation,
+    ) -> float:
+        """Return ``sqrt(b.T H^{-1} b)`` in the QP control metric."""
+        gradient = np.asarray(clf_evaluation.control_gradient, dtype=float)
+        dual = np.linalg.solve(self.qp.control_weight, gradient)
+        metric_squared = float(gradient @ dual)
+        return float(np.sqrt(max(metric_squared, 0.0)))
+
+    def _trim_control_reference(
+        self,
+        *,
+        clf_evaluation: BacksteppingCLFEvaluation,
+        trim_wrench: FloatArray | None,
+        explicit_reference: FloatArray | None,
+        control_lower: FloatArray | None,
+        control_upper: FloatArray | None,
+    ) -> tuple[FloatArray, FloatArray, float, float]:
+        """Return actual reference, full trim candidate, weight, and metric.
+
+        An explicitly supplied control reference retains its previous semantics
+        and bypasses trim activation.  Otherwise the restoring-wrench trim is
+        introduced only close to ``b = 0``.
+        """
+        if explicit_reference is not None:
+            reference = np.asarray(explicit_reference, dtype=float)
+            if reference.shape != (self.control_dim,):
+                raise ValueError(
+                    f"control_reference must have shape ({self.control_dim},), "
+                    f"got {reference.shape}."
+                )
+            if not np.all(np.isfinite(reference)):
+                raise ValueError("control_reference must contain only finite values.")
+            return (
+                reference.copy(),
+                np.zeros(self.control_dim),
+                0.0,
+                self._trim_metric(clf_evaluation),
+            )
+
+        metric = self._trim_metric(clf_evaluation)
+        if trim_wrench is None or self.trim_control_allocator is None:
+            return (
+                np.zeros(self.control_dim),
+                np.zeros(self.control_dim),
+                0.0,
+                metric,
+            )
+
+        activation = _descending_quintic_activation(
+            metric,
+            on=self.trim_activation_on,
+            off=self.trim_activation_off,
+        )
+        if activation <= 0.0:
+            return (
+                np.zeros(self.control_dim),
+                np.zeros(self.control_dim),
+                0.0,
+                metric,
+            )
+
+        wrench = np.asarray(trim_wrench, dtype=float)
+        if wrench.ndim != 1 or not np.all(np.isfinite(wrench)):
+            raise ValueError("trim_wrench must be a finite one-dimensional array.")
+
+        candidate_raw = self.trim_control_allocator(wrench)
+        if candidate_raw is None:
+            return (
+                np.zeros(self.control_dim),
+                np.zeros(self.control_dim),
+                0.0,
+                metric,
+            )
+
+        candidate = np.asarray(candidate_raw, dtype=float)
+        if candidate.shape != (self.control_dim,):
+            raise ValueError(
+                "trim_control_allocator returned a vector with the wrong dimension."
+            )
+        if not np.all(np.isfinite(candidate)):
+            raise ValueError("trim_control_allocator returned a non-finite vector.")
+
+        # A trim point outside a dynamic box override is not an admissible
+        # stationary input for this control instant.  In that case disable the
+        # trim bias rather than silently clipping it and destroying B f_tr = g.
+        lower = np.full(self.control_dim, -np.inf)
+        upper = np.full(self.control_dim, np.inf)
+        if self.qp.control_set.lower is not None:
+            lower = np.asarray(self.qp.control_set.lower, dtype=float)
+        if self.qp.control_set.upper is not None:
+            upper = np.asarray(self.qp.control_set.upper, dtype=float)
+        if control_lower is not None:
+            lower_override = np.asarray(control_lower, dtype=float)
+            if lower_override.shape != (self.control_dim,):
+                raise ValueError(
+                    f"control_lower must have shape ({self.control_dim},), "
+                    f"got {lower_override.shape}."
+                )
+            if np.any(np.isnan(lower_override)):
+                raise ValueError("control_lower must not contain NaN.")
+            lower = np.maximum(lower, lower_override)
+        if control_upper is not None:
+            upper_override = np.asarray(control_upper, dtype=float)
+            if upper_override.shape != (self.control_dim,):
+                raise ValueError(
+                    f"control_upper must have shape ({self.control_dim},), "
+                    f"got {upper_override.shape}."
+                )
+            if np.any(np.isnan(upper_override)):
+                raise ValueError("control_upper must not contain NaN.")
+            upper = np.minimum(upper, upper_override)
+        if np.any(lower > upper):
+            raise ValueError("control_lower and control_upper define an empty box.")
+
+        if (
+            np.any(candidate < lower - 1e-9)
+            or np.any(candidate > upper + 1e-9)
+            or not self.qp.control_set.contains(candidate, tolerance=1e-8)
+        ):
+            return (
+                np.zeros(self.control_dim),
+                candidate,
+                0.0,
+                metric,
+            )
+
+        return (
+            activation * candidate,
+            candidate,
+            activation,
+            metric,
+        )
+
+    def _solve_paper_qp(
+        self,
+        *,
+        clf_evaluation: BacksteppingCLFEvaluation,
+        configuration_gradient: FloatArray,
+        dynamics_bias: FloatArray,
+        filtered_velocity_derivative: FloatArray,
+        control_reference: FloatArray | None,
+        trim_wrench: FloatArray | None,
+        control_lower: FloatArray | None,
+        control_upper: FloatArray | None,
+    ) -> tuple[CLFQPResult, float, float, FloatArray, FloatArray, float, float]:
+        if self.velocity_error_gain is None:
+            # Backward-compatible path for generic second-order controllers
+            # that have not opted into the updated paper inequality.
+            reference = (
+                np.zeros(self.control_dim)
+                if control_reference is None
+                else np.asarray(control_reference, dtype=float)
+            )
+            result = self.qp.solve(
+                clf_evaluation,
+                control_reference=reference,
+                lower_override=control_lower,
+                upper_override=control_upper,
+            )
+            return (
+                result,
+                float(clf_evaluation.drift),
+                float(self.qp.alpha(clf_evaluation.value)),
+                reference.copy(),
+                np.zeros(self.control_dim),
+                0.0,
+                self._trim_metric(clf_evaluation),
+            )
+
+        constraint_drift, dissipation_rate = self._paper_constraint_terms(
+            clf_evaluation=clf_evaluation,
+            configuration_gradient=configuration_gradient,
+            dynamics_bias=dynamics_bias,
+            filtered_velocity_derivative=filtered_velocity_derivative,
+        )
+        (
+            reference,
+            trim_reference,
+            trim_activation,
+            trim_metric,
+        ) = self._trim_control_reference(
+            clf_evaluation=clf_evaluation,
+            trim_wrench=trim_wrench,
+            explicit_reference=control_reference,
+            control_lower=control_lower,
+            control_upper=control_upper,
+        )
+
+        result = self.qp.solve(
+            clf_evaluation,
+            control_reference=reference,
+            constraint_drift=constraint_drift,
+            dissipation_rate=dissipation_rate,
+            lower_override=control_lower,
+            upper_override=control_upper,
+        )
+        return (
+            result,
+            constraint_drift,
+            dissipation_rate,
+            reference,
+            trim_reference,
+            trim_activation,
+            trim_metric,
+        )
+
     def evaluate_with_feedforward_derivative(
         self,
         *,
@@ -369,6 +705,7 @@ class SecondOrderCLFQPController:
         configuration_rate_offset: float = 0.0,
         control_gradient_offset: FloatArray | None = None,
         control_reference: FloatArray | None = None,
+        trim_wrench: FloatArray | None = None,
         control_lower: FloatArray | None = None,
         control_upper: FloatArray | None = None,
     ) -> SecondOrderControllerEvaluation:
@@ -446,11 +783,23 @@ class SecondOrderCLFQPController:
             control_gradient_offset=control_gradient_offset,
         )
 
-        qp_result = self.qp.solve(
-            clf_evaluation,
+        (
+            qp_result,
+            constraint_drift,
+            dissipation_rate,
+            resolved_reference,
+            trim_reference,
+            trim_activation,
+            trim_metric,
+        ) = self._solve_paper_qp(
+            clf_evaluation=clf_evaluation,
+            configuration_gradient=gradient,
+            dynamics_bias=dynamics_bias,
+            filtered_velocity_derivative=total_filter.output_derivative,
             control_reference=control_reference,
-            lower_override=control_lower,
-            upper_override=control_upper,
+            trim_wrench=trim_wrench,
+            control_lower=control_lower,
+            control_upper=control_upper,
         )
 
         return SecondOrderControllerEvaluation(
@@ -460,6 +809,12 @@ class SecondOrderCLFQPController:
             filter=total_filter,
             clf=clf_evaluation,
             qp=qp_result,
+            constraint_drift=constraint_drift,
+            dissipation_rate=dissipation_rate,
+            control_reference=resolved_reference,
+            trim_reference=trim_reference,
+            trim_activation=trim_activation,
+            trim_metric=trim_metric,
         )
 
     def evaluate(
@@ -474,6 +829,7 @@ class SecondOrderCLFQPController:
         feedforward_velocity: FloatArray | None = None,
         control_gradient_offset: FloatArray | None = None,
         control_reference: FloatArray | None = None,
+        trim_wrench: FloatArray | None = None,
         control_lower: FloatArray | None = None,
         control_upper: FloatArray | None = None,
     ) -> SecondOrderControllerEvaluation:
@@ -518,11 +874,23 @@ class SecondOrderCLFQPController:
             control_gradient_offset=control_gradient_offset,
         )
 
-        qp_result = self.qp.solve(
-            clf_evaluation,
+        (
+            qp_result,
+            constraint_drift,
+            dissipation_rate,
+            resolved_reference,
+            trim_reference,
+            trim_activation,
+            trim_metric,
+        ) = self._solve_paper_qp(
+            clf_evaluation=clf_evaluation,
+            configuration_gradient=gradient,
+            dynamics_bias=dynamics_bias,
+            filtered_velocity_derivative=filter_evaluation.output_derivative,
             control_reference=control_reference,
-            lower_override=control_lower,
-            upper_override=control_upper,
+            trim_wrench=trim_wrench,
+            control_lower=control_lower,
+            control_upper=control_upper,
         )
 
         return SecondOrderControllerEvaluation(
@@ -532,4 +900,10 @@ class SecondOrderCLFQPController:
             filter=filter_evaluation,
             clf=clf_evaluation,
             qp=qp_result,
+            constraint_drift=constraint_drift,
+            dissipation_rate=dissipation_rate,
+            control_reference=resolved_reference,
+            trim_reference=trim_reference,
+            trim_activation=trim_activation,
+            trim_metric=trim_metric,
         )
