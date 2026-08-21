@@ -237,9 +237,13 @@ class BlueROV2AgentController:
         can add a nonnegative single-agent storage term (for example a
         workspace barrier) without modifying the edge-potential abstraction.
         ``control_gradient_offset`` remains available for auxiliary terms that
-        depend directly on optimized inputs.
+        depend directly on optimized inputs.  Unless an explicit
+        ``control_reference`` is supplied, the restoring wrench is passed
+        to the common controller as the candidate stationary trim wrench;
+        its smooth activation is handled there from the local CLF input
+        direction.
         """
-        _, _, generalized_velocity = self.model.split_state(follower_state)
+        _, quaternion, generalized_velocity = self.model.split_state(follower_state)
 
         potential, zeta = self.evaluate_edge_potential(
             follower_state=follower_state,
@@ -274,6 +278,11 @@ class BlueROV2AgentController:
             feedforward_velocity=feedforward_velocity_body,
             control_gradient_offset=control_gradient_offset,
             control_reference=control_reference,
+            trim_wrench=(
+                None
+                if control_reference is not None
+                else self.model.restoring_wrench(quaternion)
+            ),
             control_lower=control_lower,
             control_upper=control_upper,
         )

@@ -1,6 +1,7 @@
 """Tests for the BlueROV2 leader CLF-QP adapter."""
 
 import numpy as np
+import pytest
 
 from formation_control.actuation import BlueROV2HeavyThrusterAllocation
 from formation_control.control.bluerov2_design import (
@@ -75,3 +76,41 @@ def test_leader_uses_same_dynamic_controller_instance_as_followers():
     )
 
     assert leader.dynamics_controller is design.agent_controller.dynamics_controller
+
+
+def test_leader_stationary_equilibrium_uses_restoring_wrench_trim():
+    model = BlueROV2Model()
+    allocation = BlueROV2HeavyThrusterAllocation.default_45deg()
+    design = build_bluerov2_controller_design(
+        model,
+        allocation,
+        control_space="thruster",
+    )
+    state = make_state()
+    leader = BlueROV2LeaderController.from_initial_state(
+        design.agent_controller.dynamics_controller,
+        model,
+        state,
+    )
+    reference = LeaderTrajectorySample(
+        position=state[:3],
+        velocity=np.zeros(3),
+        acceleration=np.zeros(3),
+    )
+    filter_state = leader.initialize_filter(
+        state=state,
+        reference=reference,
+    )
+
+    evaluation = leader.evaluate(
+        state=state,
+        reference=reference,
+        filter_state=filter_state,
+    )
+
+    assert evaluation.controller.trim_activation == pytest.approx(1.0)
+    np.testing.assert_allclose(
+        evaluation.wrench_body,
+        model.restoring_wrench(state[3:7]),
+        atol=1e-8,
+    )
