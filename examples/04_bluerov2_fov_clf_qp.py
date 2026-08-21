@@ -6,10 +6,11 @@ cameras and regulate desired relative positions while keeping the target
 centered in the image.
 
 The example supports conservative distance/FoV barriers and optional
-domain-preserving normalized funnel relaxation toward the physical admissible
-domain. The physical CLF-QP treats the current funnel state as frozen and
-optimizes only the physical actuator input. The auxiliary funnel rate is
-computed independently from a sampled-data barrier-domain condition.
+smooth barrier-potential relaxation of the conservative sensing domains.
+The physical CLF-QP treats the current funnel state as frozen and optimizes
+only the physical actuator input.  The auxiliary funnel dynamics depend only
+on the current constraint values and therefore do not require parent velocity
+or constraint derivatives.
 """
 
 from __future__ import annotations
@@ -352,7 +353,10 @@ def build_relaxation_policy(
     distance_constraints: bool,
     fov_constraints: bool,
     recovery_gain: float,
+    barrier_gain: float,
     domain_margin_ratio: float,
+    activation_on_ratio: float,
+    activation_off_ratio: float,
 ) -> FunnelRelaxationPolicy:
     maximum = np.array(
         [
@@ -366,7 +370,10 @@ def build_relaxation_policy(
     return FunnelRelaxationPolicy(
         maximum_enlargement=maximum,
         recovery_gain=recovery_gain,
+        barrier_gain=barrier_gain,
         domain_margin_ratio=domain_margin_ratio,
+        activation_on_ratio=activation_on_ratio,
+        activation_off_ratio=activation_off_ratio,
         minimum_constraint_margin=1e-5,
     )
 
@@ -587,7 +594,10 @@ def simulate(
     virtual_linear_speed_limit: float = 1.5,
     virtual_angular_speed_limit: float = 2.0,
     relaxation_recovery_gain: float = 0.8,
-    relaxation_domain_margin_ratio: float = 0.1,
+    relaxation_barrier_gain: float = 0.20,
+    relaxation_domain_margin_ratio: float = 0.10,
+    relaxation_activation_on_ratio: float = 0.10,
+    relaxation_activation_off_ratio: float = 0.30,
 ) -> tuple[
     FormationScenario,
     FormationTrajectory,
@@ -631,7 +641,10 @@ def simulate(
         distance_constraints=distance_constraints,
         fov_constraints=fov_constraints,
         recovery_gain=relaxation_recovery_gain,
+        barrier_gain=relaxation_barrier_gain,
         domain_margin_ratio=relaxation_domain_margin_ratio,
+        activation_on_ratio=relaxation_activation_on_ratio,
+        activation_off_ratio=relaxation_activation_off_ratio,
     )
     enabled_relaxation = relaxation_enabled_mask(
         distance_constraints=distance_constraints,
@@ -1060,17 +1073,16 @@ def simulate(
                 controller_times[step, observer] = perf_counter() - start_time
                 continue
 
-            # Secondary layer: independently choose v = s_dot. Its only role
-            # is to preserve the logarithmic-barrier domain while otherwise
-            # recovering s -> 0.
+            # Secondary layer: smooth barrier-gradient dynamics for s_dot.
+            # The law uses only the current constraint values, becomes strongly
+            # repulsive near the prescribed positive adaptive margin, and
+            # otherwise recovers s -> 0.
             if adaptive:
                 try:
                     relaxation_evaluation = relaxation.evaluate(
                         relaxation_state[observer],
                         conservative_values=kinematics.values,
-                        conservative_rates=kinematics.rates,
                         enabled=enabled_relaxation,
-                        sample_time=dt,
                     )
                 except FunnelRelaxationInfeasibleError as error:
                     activate_fallback(
@@ -1199,10 +1211,9 @@ def simulate(
                 assert relaxation_evaluation is not None
                 relaxation_rate = relaxation_evaluation.selected_rate
                 relaxation_rate_history[step, observer] = relaxation_rate
-                next_relaxation_state[observer] = np.clip(
+                next_relaxation_state[observer] = np.maximum(
                     relaxation_state[observer] + dt * relaxation_rate,
                     0.0,
-                    1.0,
                 )
 
             filters[observer] = filter_integrator.step(
