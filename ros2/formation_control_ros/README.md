@@ -129,6 +129,36 @@ The `robot_configuration` dynamics preset accepts `gazebo`, `standard`, or
 launch deliberately defaults each robot to `standard` and exposes separate
 `leader_robot_configuration` and `follower_robot_configuration` arguments.
 
+### Optional Gazebo-synchronized timing
+
+The five-robot tree launch uses wall-clock timers by default. For simulations
+running below real time, the complete experiment can instead follow Gazebo
+simulation time:
+
+```bash
+ros2 launch formation_control_ros five_robot_tree_experiment.launch.py \
+    gazebo_timer:=true \
+    leader_reference_mode:=velocity
+```
+
+This option starts a Gazebo-to-ROS `/clock` bridge and enables `use_sim_time`
+for the leader and follower controllers. The PX4 offboard heartbeats and the
+initialization phase manager deliberately remain on wall time so clock startup
+or a paused simulation cannot suppress heartbeat or phase messages. Run the
+mission profile with the matching option so its command and settling durations
+use Gazebo time:
+
+```bash
+python scripts/run_five_robot_tree_experiment.py \
+    --leader itrl_rov_1 \
+    --profile full \
+    --gazebo-timer
+```
+
+If Gazebo is paused, controller and mission time pause; heartbeat and phase
+publication continue. Omitting the options preserves the existing wall-clock
+behavior.
+
 ## ROS 2 nodes
 
 ### `leader_controller`

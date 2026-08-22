@@ -17,7 +17,8 @@ is reused without changing the core control architecture.
 """
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -218,6 +219,7 @@ def generate_launch_description() -> LaunchDescription:
 
     dt = LaunchConfiguration("dt")
     dry_run = LaunchConfiguration("dry_run")
+    gazebo_timer = LaunchConfiguration("gazebo_timer")
     leader_reference_mode = LaunchConfiguration("leader_reference_mode")
 
     position_gain = LaunchConfiguration("position_gain")
@@ -237,6 +239,7 @@ def generate_launch_description() -> LaunchDescription:
 
     common = {
         "dt": dt,
+        "use_sim_time": ParameterValue(gazebo_timer, value_type=bool),
         "state_source": "px4",
         "control_space": "thruster",
         "dry_run": dry_run,
@@ -287,6 +290,14 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("dt", default_value="0.02"),
         DeclareLaunchArgument("dry_run", default_value="true"),
         DeclareLaunchArgument(
+            "gazebo_timer",
+            default_value="false",
+            description=(
+                "Run leader and follower controller timers from Gazebo "
+                "/clock instead of wall time."
+            ),
+        ),
+        DeclareLaunchArgument(
             "leader_reference_mode",
             default_value="stationary",
         ),
@@ -310,6 +321,17 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument(
             "workspace_adaptive",
             default_value="true",
+        ),
+        ExecuteProcess(
+            cmd=[
+                "ros2",
+                "run",
+                "ros_gz_bridge",
+                "parameter_bridge",
+                "/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock",
+            ],
+            output="screen",
+            condition=IfCondition(gazebo_timer),
         ),
         OpaqueFunction(function=_phase_manager_setup),
         Node(
