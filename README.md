@@ -80,6 +80,11 @@ w = B f
 
 and physical thruster bounds enforced directly by the CLF-QP.
 
+The default dynamics preset is `gazebo`, which reduces the active SITL SDF's
+base and eight thruster links to one rigid body and reproduces its buoyancy,
+added-mass, and damping values. The characterized real-robot presets
+`standard` and `heavy_tube` remain selectable explicitly.
+
 ### Formation and sensing constraints
 
 For every directed sensing edge, the follower regulates the desired relative position while maintaining:

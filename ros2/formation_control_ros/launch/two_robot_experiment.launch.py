@@ -113,6 +113,12 @@ def generate_launch_description() -> LaunchDescription:
     dt = LaunchConfiguration("dt")
     dry_run = LaunchConfiguration("dry_run")
     leader_reference_mode = LaunchConfiguration("leader_reference_mode")
+    leader_robot_configuration = LaunchConfiguration(
+        "leader_robot_configuration"
+    )
+    follower_robot_configuration = LaunchConfiguration(
+        "follower_robot_configuration"
+    )
     workspace_barrier_enabled = LaunchConfiguration("workspace_barrier_enabled")
     workspace_adaptive = LaunchConfiguration("workspace_adaptive")
     position_gain = LaunchConfiguration("position_gain")
@@ -188,6 +194,22 @@ def generate_launch_description() -> LaunchDescription:
                 default_value="stationary",
             ),
             DeclareLaunchArgument(
+                "leader_robot_configuration",
+                default_value="standard",
+                description=(
+                    "Dynamics preset for the leader: "
+                    "'gazebo', 'standard', or 'heavy_tube'."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "follower_robot_configuration",
+                default_value="standard",
+                description=(
+                    "Dynamics preset for the follower: "
+                    "'gazebo', 'standard', or 'heavy_tube'."
+                ),
+            ),
+            DeclareLaunchArgument(
                 "position_gain",
                 default_value="2.0",
                 description="Leader position-potential gain.",
@@ -236,6 +258,7 @@ def generate_launch_description() -> LaunchDescription:
                     common,
                     {
                         "robot_name": leader,
+                        "robot_configuration": leader_robot_configuration,
                         "reference_mode": leader_reference_mode,
                         "experiment_phase_topic": PHASE_TOPIC,
                         "initialization_position": INITIAL_LEADER_POSITION,
@@ -263,6 +286,7 @@ def generate_launch_description() -> LaunchDescription:
                     common,
                     {
                         "robot_name": follower,
+                        "robot_configuration": follower_robot_configuration,
                         "parent_robot_name": leader,
                         "desired_relative_position": INITIAL_RELATIVE,
                         "initialization_position": INITIAL_FOLLOWER_POSITION,

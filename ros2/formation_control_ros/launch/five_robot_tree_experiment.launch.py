@@ -291,18 +291,18 @@ def generate_launch_description() -> LaunchDescription:
             default_value="stationary",
         ),
         DeclareLaunchArgument("position_gain", default_value="2.0"),
-        DeclareLaunchArgument("formation_gain", default_value="2.0"),
+        DeclareLaunchArgument("formation_gain", default_value="1.0"),
         DeclareLaunchArgument("virtual_linear_gain", default_value="1.0"),
         DeclareLaunchArgument("virtual_angular_gain", default_value="1.2"),
         DeclareLaunchArgument(
             "command_filter_linear_bandwidth",
-            default_value="3.0",
+            default_value="10.0",
         ),
         DeclareLaunchArgument(
             "command_filter_angular_bandwidth",
-            default_value="4.0",
+            default_value="10.0",
         ),
-        DeclareLaunchArgument("alpha_gain", default_value="1.5"),
+        DeclareLaunchArgument("alpha_gain", default_value="3.0"),
         DeclareLaunchArgument(
             "workspace_barrier_enabled",
             default_value="true",

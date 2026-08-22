@@ -48,7 +48,7 @@ from formation_control.geometry import (
     PinholeCamera,
     rotation_matrix_from_quaternion,
 )
-from formation_control.models import BlueROV2Model
+from formation_control.models import BlueROV2Model, BlueROV2Parameters
 from formation_control.potentials import (
     AdaptiveConstraintBarrierPotential,
     ConstraintBarrierPotential,
@@ -69,6 +69,7 @@ class CoreControllerConfig:
     """Core tuning shared by leader and follower ROS nodes."""
 
     control_space: BlueROV2ControlSpace = "thruster"
+    robot_configuration: str = "gazebo"
     thruster_voltage: int = 16
     thrust_derating: float = 1.0
     virtual_linear_speed_limit: float = 1.5
@@ -309,7 +310,11 @@ class FollowerCoreRuntime:
         self.workspace_config = workspace_config
         self._workspace = _WorkspaceRuntime(workspace_config)
 
-        self.model = BlueROV2Model()
+        self.model = BlueROV2Model(
+            BlueROV2Parameters.from_configuration(
+                controller_config.robot_configuration
+            )
+        )
         self.allocation = BlueROV2HeavyThrusterAllocation.default_45deg(
             voltage=controller_config.thruster_voltage,
             derating=controller_config.thrust_derating,
@@ -797,7 +802,11 @@ class LeaderCoreRuntime:
     ) -> None:
         self.workspace_config = workspace_config
         self._workspace = _WorkspaceRuntime(workspace_config)
-        self.model = BlueROV2Model()
+        self.model = BlueROV2Model(
+            BlueROV2Parameters.from_configuration(
+                controller_config.robot_configuration
+            )
+        )
         self.allocation = BlueROV2HeavyThrusterAllocation.default_45deg(
             voltage=controller_config.thruster_voltage,
             derating=controller_config.thrust_derating,
@@ -990,4 +999,3 @@ class LeaderCoreRuntime:
             ),
             snapshot=snapshot,
         )
-

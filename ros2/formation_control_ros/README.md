@@ -124,6 +124,11 @@ Direct eight-thruster offboard actuation should be implemented later as a
 separate interface if exact reproduction of the thruster-space QP decision is
 required.  It should not be mixed silently with the body-wrench interface.
 
+The `robot_configuration` dynamics preset accepts `gazebo`, `standard`, or
+`heavy_tube`. Generic nodes default to `gazebo`. The two-robot real-experiment
+launch deliberately defaults each robot to `standard` and exposes separate
+`leader_robot_configuration` and `follower_robot_configuration` arguments.
+
 ## ROS 2 nodes
 
 ### `leader_controller`
