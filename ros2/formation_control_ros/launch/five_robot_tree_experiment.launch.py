@@ -54,6 +54,10 @@ FORMATION_NAMES = [
     "tree_wide",
     "tree_compact",
     "tree_staggered",
+    "tree_depth_split",
+    "tree_crossed_3d",
+    "tree_opposed_3d",
+    "tree_parallel_3d",
 ]
 
 # Per-edge parent-minus-follower vectors in core NWU.
@@ -72,6 +76,25 @@ FORMATION_NAMES = [
 #   nominal horizontal geometry with alternating depth offsets. The second
 #   level offsets oppose the first level, so z displacement does not accumulate
 #   at the leaf robots.
+#
+# The four formations below are reserved for the challenging profile. Their
+# absolute references at the initial leader position are:
+#
+#                     robot 2                 robot 3
+# depth_split   (-0.50, 2.80, -95.75)  (-1.90, 2.80, -94.85)
+# crossed_3d    (-0.25, 2.45, -95.75)  (-2.15, 2.45, -94.85)
+# opposed_3d    (-2.55, 2.30, -95.75)  ( 0.15, 2.30, -94.85)
+# parallel_3d   (-0.10, 3.40, -95.90)  (-2.30, 3.40, -94.85)
+#
+#                     robot 4                 robot 5
+# depth_split   ( 0.00, 4.25, -96.15)  (-2.40, 4.25, -94.85)
+# crossed_3d    (-2.55, 4.05, -96.15)  ( 0.15, 4.05, -94.85)
+# opposed_3d    (-2.60, 4.60, -96.10)  ( 0.20, 4.60, -94.85)
+# parallel_3d   (-0.10, 5.20, -95.90)  (-2.30, 5.20, -94.85)
+#
+# ``tree_depth_split`` establishes vertical separation before either pair of
+# robots exchanges lateral sides. This keeps even the unconnected robot pairs
+# separated during the large crossed transitions.
 D21_FORMATIONS = [
     -0.70,
     -1.65,
@@ -85,6 +108,18 @@ D21_FORMATIONS = [
     -0.70,
     -1.65,
     0.10,
+    -0.70,
+    -1.65,
+    0.55,
+    -0.95,
+    -1.30,
+    0.55,
+    1.35,
+    -1.15,
+    0.55,
+    -1.10,
+    -2.25,
+    0.70,
 ]
 
 D31_FORMATIONS = [
@@ -100,6 +135,18 @@ D31_FORMATIONS = [
     0.70,
     -1.65,
     -0.10,
+    0.70,
+    -1.65,
+    -0.35,
+    0.95,
+    -1.30,
+    -0.35,
+    -1.35,
+    -1.15,
+    -0.35,
+    1.10,
+    -2.25,
+    -0.35,
 ]
 
 D42_FORMATIONS = [
@@ -115,6 +162,18 @@ D42_FORMATIONS = [
     -0.50,
     -1.45,
     -0.10,
+    -0.50,
+    -1.45,
+    0.40,
+    2.30,
+    -1.60,
+    0.40,
+    0.05,
+    -2.30,
+    0.35,
+    0.00,
+    -1.80,
+    0.00,
 ]
 
 D53_FORMATIONS = [
@@ -130,6 +189,18 @@ D53_FORMATIONS = [
     0.50,
     -1.45,
     0.10,
+    0.50,
+    -1.45,
+    0.00,
+    -2.30,
+    -1.60,
+    0.00,
+    -0.05,
+    -2.30,
+    0.00,
+    0.00,
+    -1.80,
+    0.00,
 ]
 
 
