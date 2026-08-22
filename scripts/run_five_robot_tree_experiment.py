@@ -308,14 +308,13 @@ class FiveRobotExperimentRunner(Node):
         )
 
     def run_challenging(self) -> None:
-        """Stress moving-leader tracking and sensing-domain adaptation.
+        """Execute large, collision-aware three-dimensional tree changes.
 
-        The first pulse starts from ``tree_wide`` and moves the leader in -y,
-        away from its first-level followers. If those followers were
-        momentarily stationary, the approximately 1 m pulse would increase the
-        first-level distance from about 2.24 m to about 3.16 m: beyond the
-        conservative 3.0 m range but still below the physical 3.6 m range.
-        The actual closed-loop excursion is smaller because the followers move.
+        The two branches are separated in depth before robots exchange sides.
+        The subsequent crossed, opposed, and parallel geometries command
+        approximately 2.3--2.7 m displacements for different tree levels.
+        All steady references remain inside the conservative tank workspace
+        and all edge lengths remain inside the conservative sensing domain.
         """
         self.get_logger().info(
             "=== CHALLENGING FIVE-ROBOT TREE EXPERIMENT START ==="
@@ -324,44 +323,35 @@ class FiveRobotExperimentRunner(Node):
         self.publish_formation("tree_nominal")
         self.settle(6.0)
 
-        # Preload the first-level edges with the wide geometry.
-        self.publish_formation("tree_wide")
+        # Establish 0.8--1.3 m depth separation before any lateral crossing.
+        self.publish_formation("tree_depth_split")
         self.settle(10.0)
 
-        # Main sensing-domain stress event: about -1.0 m in y.
-        self.publish_velocity(0.0, -0.40, 0.0, duration=2.5)
-        self.settle(10.0)
+        # The leaves exchange sides by about 2.6 m, producing an X-shaped tree.
+        self.publish_formation("tree_crossed_3d")
+        self.settle(16.0)
 
-        # Contract before a large diagonal translation.
-        self.publish_formation("tree_compact")
-        self.settle(8.0)
+        # The first-level followers now exchange sides by about 2.3 m while
+        # the leaves remain near the tank sides, yielding two opposed columns.
+        self.publish_formation("tree_opposed_3d")
+        self.settle(16.0)
 
-        # About (+0.7, +1.2) m.  Limiting the +x displacement keeps robot 4's
-        # compact-formation reference comfortably inside the conservative
-        # workspace instead of placing it next to the positive-x wall.
-        self.publish_velocity(0.175, 0.30, 0.0, duration=4.0)
-        self.settle(10.0)
+        # All four followers move roughly 2.6 m into two parallel, depth-
+        # separated branches near the far end of the tank.
+        self.publish_formation("tree_parallel_3d")
+        self.settle(18.0)
 
-        # Undo x while compact, before expanding the footprint again.
-        self.publish_velocity(-0.175, 0.0, 0.0, duration=4.0)
-        self.settle(8.0)
+        # Re-form the crossed X from the opposite side of the workspace.
+        self.publish_formation("tree_crossed_3d")
+        self.settle(16.0)
 
-        self.publish_formation("tree_staggered")
-        self.settle(10.0)
-
-        # Mild 3-D excitation.
-        self.publish_velocity(0.0, 0.0, 0.10, duration=2.0)
-        self.settle(8.0)
-
-        self.publish_velocity(0.0, 0.0, -0.10, duration=2.0)
-        self.settle(8.0)
-
-        # Remove the remaining approximately +0.2 m net y displacement.
-        self.publish_velocity(0.0, -0.10, 0.0, duration=2.0)
-        self.settle(8.0)
+        # Restore the uncrossed lateral ordering while retaining depth
+        # separation, then close the depth layers only after paths are clear.
+        self.publish_formation("tree_depth_split")
+        self.settle(14.0)
 
         self.publish_formation("tree_nominal")
-        self.settle(12.0)
+        self.settle(14.0)
 
         self.stop_leader()
         self.get_logger().info(
