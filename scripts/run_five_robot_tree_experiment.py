@@ -28,6 +28,7 @@ import time
 import rclpy
 from geometry_msgs.msg import Twist
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import (
     DurabilityPolicy,
     HistoryPolicy,
@@ -36,15 +37,26 @@ from rclpy.qos import (
 )
 from std_msgs.msg import String
 
-
 PHASE_TOPIC = "/formation_control/experiment_phase"
 FORMATION_TOPIC = "/formation_control/desired_formation"
 
 
 class FiveRobotExperimentRunner(Node):
-    def __init__(self, leader: str, expected_followers: int = 4) -> None:
-        super().__init__("five_robot_experiment_runner")
+    def __init__(
+        self,
+        leader: str,
+        expected_followers: int = 4,
+        *,
+        gazebo_timer: bool = False,
+    ) -> None:
+        super().__init__(
+            "five_robot_experiment_runner",
+            parameter_overrides=[
+                Parameter("use_sim_time", value=bool(gazebo_timer)),
+            ],
+        )
         self.expected_followers = int(expected_followers)
+        self.gazebo_timer = bool(gazebo_timer)
 
         formation_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -85,13 +97,21 @@ class FiveRobotExperimentRunner(Node):
             phase_qos,
         )
 
+        clock_source = "Gazebo simulation time" if self.gazebo_timer else "wall time"
+        self.get_logger().info(f"Experiment mission timer uses {clock_source}.")
+
     def _phase_callback(self, message: String) -> None:
         self.phase = message.data.strip().upper()
 
+    def _now_seconds(self) -> float:
+        if self.gazebo_timer:
+            return 1e-9 * float(self.get_clock().now().nanoseconds)
+        return time.monotonic()
+
     def _spin_sleep(self, duration: float) -> None:
-        deadline = time.monotonic() + duration
-        while rclpy.ok() and time.monotonic() < deadline:
-            remaining = deadline - time.monotonic()
+        deadline = self._now_seconds() + duration
+        while rclpy.ok() and self._now_seconds() < deadline:
+            remaining = deadline - self._now_seconds()
             rclpy.spin_once(self, timeout_sec=min(0.05, remaining))
 
     def wait_for_phase(self, desired: str) -> None:
@@ -149,11 +169,11 @@ class FiveRobotExperimentRunner(Node):
         message = String()
         message.data = name
         period = 1.0 / rate_hz
-        deadline = time.monotonic() + duration
-        while rclpy.ok() and time.monotonic() < deadline:
+        deadline = self._now_seconds() + duration
+        while rclpy.ok() and self._now_seconds() < deadline:
             self.formation_pub.publish(message)
             rclpy.spin_once(self, timeout_sec=0.0)
-            time.sleep(period)
+            self._spin_sleep(period)
 
     def stop_leader(self) -> None:
         message = Twist()
@@ -162,7 +182,7 @@ class FiveRobotExperimentRunner(Node):
                 return
             self.cmd_vel_pub.publish(message)
             rclpy.spin_once(self, timeout_sec=0.0)
-            time.sleep(0.05)
+            self._spin_sleep(0.05)
 
     def publish_velocity(
         self,
@@ -188,11 +208,11 @@ class FiveRobotExperimentRunner(Node):
         message.linear.z = float(vz)
 
         period = 1.0 / rate_hz
-        deadline = time.monotonic() + duration
-        while rclpy.ok() and time.monotonic() < deadline:
+        deadline = self._now_seconds() + duration
+        while rclpy.ok() and self._now_seconds() < deadline:
             self.cmd_vel_pub.publish(message)
             rclpy.spin_once(self, timeout_sec=0.0)
-            time.sleep(period)
+            self._spin_sleep(period)
 
         self.stop_leader()
 
@@ -357,10 +377,19 @@ def main() -> None:
         choices=("cautious", "full", "challenging"),
         default="cautious",
     )
+    parser.add_argument(
+        "--gazebo-timer",
+        "--gazebo_timer",
+        action="store_true",
+        help="time all mission phases from Gazebo /clock instead of wall time",
+    )
     args = parser.parse_args()
 
     rclpy.init()
-    node = FiveRobotExperimentRunner(args.leader)
+    node = FiveRobotExperimentRunner(
+        args.leader,
+        gazebo_timer=args.gazebo_timer,
+    )
 
     try:
         node.wait_for_phase("FORMATION")
