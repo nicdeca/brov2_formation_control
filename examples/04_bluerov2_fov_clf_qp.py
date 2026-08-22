@@ -17,14 +17,17 @@ from __future__ import annotations
 
 import argparse
 import csv
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from time import perf_counter
 
 import matplotlib.pyplot as plt
 import numpy as np
 
-from formation_control.actuation import BlueROV2HeavyThrusterAllocation
+from formation_control.actuation import (
+    BlueROV2HeavyThrusterAllocation,
+    T200ForceLimits,
+)
 from formation_control.constraints import (
     DistanceDomain,
     FieldOfViewDomain,
@@ -598,6 +601,7 @@ def simulate(
     relaxation_domain_margin_ratio: float = 0.10,
     relaxation_activation_on_ratio: float = 0.10,
     relaxation_activation_off_ratio: float = 0.30,
+    thruster_force_limits: T200ForceLimits | None = None,
 ) -> tuple[
     FormationScenario,
     FormationTrajectory,
@@ -624,6 +628,14 @@ def simulate(
         voltage=thruster_voltage,
         derating=thrust_derating,
     )
+    if thruster_force_limits is not None:
+        allocation = BlueROV2HeavyThrusterAllocation(
+            configuration=replace(
+                allocation.configuration,
+                force_limits=thruster_force_limits,
+            )
+        )
+
     controller_design = build_agent_controller(
         model,
         allocation,
@@ -1108,7 +1120,9 @@ def simulate(
 
             controller_times[step, observer] = perf_counter() - start_time
 
-            controls[step, observer] = controller_design.representative_thruster_forces(evaluation)
+            controls[step, observer] = (
+                controller_design.representative_thruster_forces(evaluation)
+            )
             slacks[step, observer] = evaluation.slack
             if evaluation.required_slack is not None:
                 required_slacks[step, observer] = evaluation.required_slack

@@ -14,6 +14,7 @@
     # Optimize directly over the 8 individual thruster forces.
     # The equivalent body wrench B f is then sent to PX4.
     control_space: thruster
+    robot_configuration: gazebo
     thruster_voltage: 16
     thrust_derating: 1.0
 

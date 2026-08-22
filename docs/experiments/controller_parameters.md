@@ -3,6 +3,12 @@
 This page summarizes the main tuning parameters exposed by the current ROS
 controller.
 
+## Robot dynamics preset
+
+`robot_configuration` selects `gazebo`, `standard`, or `heavy_tube`. Generic
+nodes default to `gazebo`. Real-experiment launch files should set the
+characterized preset independently for each vehicle.
+
 ## Geometric/task gains
 
 ### `position_gain`

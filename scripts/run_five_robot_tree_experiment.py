@@ -264,18 +264,22 @@ class FiveRobotExperimentRunner(Node):
         self.publish_velocity(0.18, 0.0, 0.0, duration=3.5)
         self.settle(10.0)
 
-        self.publish_formation("tree_staggered")
-        self.settle(12.0)
+        # Return to the centered leader reference while the compact formation
+        # still provides ample workspace margin.  Expanding to tree_staggered
+        # at the translated reference would place robot 4 at approximately
+        # x=0.63 m, outside the conservative reference upper bound of 0.625 m
+        # (the 0.675 m conservative wall minus the 0.05 m reference margin).
+        self.publish_velocity(-0.18, 0.0, 0.0, duration=3.5)
+        self.settle(10.0)
 
-        # Undo y while keeping the depth-two tree.
+        # Undo y before restoring the larger tree footprint.
         self.publish_velocity(0.0, -0.25, 0.0, duration=4.0)
         self.settle(10.0)
 
-        self.publish_formation("tree_nominal")
-        self.settle(10.0)
+        self.publish_formation("tree_staggered")
+        self.settle(12.0)
 
-        # Undo x.
-        self.publish_velocity(-0.18, 0.0, 0.0, duration=3.5)
+        self.publish_formation("tree_nominal")
         self.settle(12.0)
 
         self.stop_leader()
@@ -312,12 +316,14 @@ class FiveRobotExperimentRunner(Node):
         self.publish_formation("tree_compact")
         self.settle(8.0)
 
-        # About (+1.0, +1.2) m.
-        self.publish_velocity(0.25, 0.30, 0.0, duration=4.0)
+        # About (+0.7, +1.2) m.  Limiting the +x displacement keeps robot 4's
+        # compact-formation reference comfortably inside the conservative
+        # workspace instead of placing it next to the positive-x wall.
+        self.publish_velocity(0.175, 0.30, 0.0, duration=4.0)
         self.settle(10.0)
 
         # Undo x while compact, before expanding the footprint again.
-        self.publish_velocity(-0.25, 0.0, 0.0, duration=4.0)
+        self.publish_velocity(-0.175, 0.0, 0.0, duration=4.0)
         self.settle(8.0)
 
         self.publish_formation("tree_staggered")

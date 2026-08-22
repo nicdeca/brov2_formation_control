@@ -24,6 +24,7 @@ def declare_common_parameters(node: Node) -> None:
     # Core controller.  Wrench space is the natural choice when PX4 performs
     # the downstream allocation.
     node.declare_parameter("control_space", "wrench")
+    node.declare_parameter("robot_configuration", "gazebo")
     node.declare_parameter("thruster_voltage", 16)
     node.declare_parameter("thrust_derating", 1.0)
     node.declare_parameter("virtual_linear_speed_limit", 1.5)
@@ -53,6 +54,9 @@ def frame_convention_from_parameters(node: Node) -> FrameConvention:
 def controller_config_from_parameters(node: Node) -> CoreControllerConfig:
     return CoreControllerConfig(
         control_space=str(node.get_parameter("control_space").value),
+        robot_configuration=str(
+            node.get_parameter("robot_configuration").value
+        ),
         thruster_voltage=int(node.get_parameter("thruster_voltage").value),
         thrust_derating=float(node.get_parameter("thrust_derating").value),
         virtual_linear_speed_limit=float(
