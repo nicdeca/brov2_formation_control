@@ -17,6 +17,9 @@ Typical usage::
 
     uv run python scripts/plot_formation_experiment.py RUN/formation_history.npz \
         --all --save
+
+    uv run python scripts/plot_formation_experiment.py RUN/formation_history.npz \
+        --animation --save --animation-format mp4 --frame-stride 2
 """
 
 from __future__ import annotations
@@ -49,12 +52,16 @@ from formation_control.visualization import (
     BlueROV2HeavyVisualGeometry,
     apply_visualization_style,
     plot_formation_3d,
+    save_animation,
     save_figure,
+)
+from formation_control.visualization.formation_3d import (
+    DesiredVehicleStyle3D,
+    animate_formation_3d,
 )
 from formation_control.visualization.domain_relaxation_plot import (
     plot_vertical_fov_relaxation_from_histories,
 )
-
 
 PAPER_PLOTS = {
     "trajectory",
@@ -82,6 +89,58 @@ ALL_PLOTS = PAPER_PLOTS | {
     "backstepping",
     "peak_debug",
 }
+
+
+def _apply_paper_quality_style() -> None:
+    """Use large fonts suitable for figures embedded in an ICRA paper."""
+    plt.rcParams.update(
+        {
+            "font.size": 16,
+            "axes.labelsize": 17,
+            "axes.titlesize": 17,
+            "xtick.labelsize": 15,
+            "ytick.labelsize": 15,
+            "legend.fontsize": 14,
+            "figure.titlesize": 17,
+            "lines.linewidth": 3.0,
+            "axes.linewidth": 1.2,
+            "xtick.major.width": 1.2,
+            "ytick.major.width": 1.2,
+            "xtick.major.size": 5.0,
+            "ytick.major.size": 5.0,
+        }
+    )
+
+
+def _apply_plot_style(paper_quality: bool) -> None:
+    """Apply the shared style and then enforce larger paper-quality fonts."""
+    apply_visualization_style(paper_quality=paper_quality)
+    if paper_quality:
+        _apply_paper_quality_style()
+
+
+def _apply_paper_quality_to_figure(figure: plt.Figure) -> None:
+    """Enlarge text and line elements of an already-created figure."""
+    for axis in figure.axes:
+        axis.title.set_fontsize(17)
+        axis.xaxis.label.set_fontsize(17)
+        axis.yaxis.label.set_fontsize(17)
+
+        axis.tick_params(
+            axis="both",
+            which="major",
+            labelsize=15,
+            width=1.2,
+            length=5.0,
+        )
+
+        legend = axis.get_legend()
+        if legend is not None:
+            for legend_text in legend.get_texts():
+                legend_text.set_fontsize(14)
+
+        for line in axis.get_lines():
+            line.set_linewidth(max(line.get_linewidth(), 2.0))
 
 
 def _load_legacy_module(repo_root: Path) -> ModuleType:
@@ -275,9 +334,7 @@ def _build_legacy_data(
         (control_times, np.array([control_times[-1] + dt]))
     )
     positions = _extend_state_history(np.asarray(arrays["positions"], dtype=float))
-    quaternions = _extend_state_history(
-        np.asarray(arrays["quaternions"], dtype=float)
-    )
+    quaternions = _extend_state_history(np.asarray(arrays["quaternions"], dtype=float))
     velocity_world = _world_linear_velocity(
         np.asarray(arrays["quaternions"], dtype=float),
         np.asarray(arrays["linear_velocity_body"], dtype=float),
@@ -331,14 +388,20 @@ def _build_legacy_data(
     )
     s_history_extended = _extend_state_history(s_history)
 
-    constraints = _first_finite_vector(
-        arrays["constraints_enabled"],
-        first_follower,
-    ) > 0.5
-    adaptive = _first_finite_scalar(
-        arrays["adaptive_enabled"],
-        first_follower,
-    ) > 0.5
+    constraints = (
+        _first_finite_vector(
+            arrays["constraints_enabled"],
+            first_follower,
+        )
+        > 0.5
+    )
+    adaptive = (
+        _first_finite_scalar(
+            arrays["adaptive_enabled"],
+            first_follower,
+        )
+        > 0.5
+    )
     domain_margin_ratio = _first_finite_scalar(
         arrays["domain_margin_ratio"],
         first_follower,
@@ -355,9 +418,7 @@ def _build_legacy_data(
         "velocity_backstepping_rate": np.asarray(
             arrays["clf_velocity_backstepping_rate"], dtype=float
         ),
-        "dynamics_bias_rate": np.asarray(
-            arrays["clf_dynamics_bias_rate"], dtype=float
-        ),
+        "dynamics_bias_rate": np.asarray(arrays["clf_dynamics_bias_rate"], dtype=float),
         "dynamics_bias_linear_rate": np.asarray(
             arrays["clf_dynamics_bias_linear_rate"], dtype=float
         ),
@@ -391,15 +452,9 @@ def _build_legacy_data(
         "filtered_angular_acceleration_norm": np.asarray(
             arrays["clf_filtered_angular_acceleration_norm"], dtype=float
         ),
-        "generalized_velocity": np.asarray(
-            arrays["generalized_velocity"], dtype=float
-        ),
-        "filtered_velocity": np.asarray(
-            arrays["filtered_velocity"], dtype=float
-        ),
-        "desired_velocity": np.asarray(
-            arrays["desired_velocity"], dtype=float
-        ),
+        "generalized_velocity": np.asarray(arrays["generalized_velocity"], dtype=float),
+        "filtered_velocity": np.asarray(arrays["filtered_velocity"], dtype=float),
+        "desired_velocity": np.asarray(arrays["desired_velocity"], dtype=float),
         "filtered_velocity_derivative": np.asarray(
             arrays["filtered_velocity_derivative"], dtype=float
         ),
@@ -410,17 +465,16 @@ def _build_legacy_data(
         "minimum_modeled_derivative": np.asarray(
             arrays["clf_minimum_modeled_derivative"], dtype=float
         ),
-        "hard_clf_residual": np.asarray(
-            arrays["clf_hard_residual"], dtype=float
-        ),
+        "hard_clf_residual": np.asarray(arrays["clf_hard_residual"], dtype=float),
     }
     # The current pure-Python example also stores the pre-saturation virtual
     # command, but schema v1 intentionally does not because no existing ROS
     # plot requires it.  Supply explicit NaNs only when that legacy dataclass
     # version requires the field.
-    if "unlimited_desired_velocity" in inspect.signature(
-        legacy.CLFDiagnosticHistory
-    ).parameters:
+    if (
+        "unlimited_desired_velocity"
+        in inspect.signature(legacy.CLFDiagnosticHistory).parameters
+    ):
         clf_kwargs["unlimited_desired_velocity"] = np.full_like(
             np.asarray(arrays["desired_velocity"], dtype=float),
             np.nan,
@@ -443,9 +497,7 @@ def _build_legacy_data(
         "fov_domain": fov_domain,
         "rho_history": rho_history,
         "s_history": s_history_extended,
-        "relaxation_rate_history": np.asarray(
-            arrays["relaxation_rate"], dtype=float
-        ),
+        "relaxation_rate_history": np.asarray(arrays["relaxation_rate"], dtype=float),
         "image_history": image_history,
         "slacks": np.asarray(arrays["slack"], dtype=float),
         "required_slacks": np.asarray(arrays["required_slack"], dtype=float),
@@ -461,9 +513,7 @@ def _build_legacy_data(
 
 
 def _selected_plots(args: argparse.Namespace) -> set[str]:
-    selected = {
-        name for name in ALL_PLOTS if bool(getattr(args, name, False))
-    }
+    selected = {name for name in ALL_PLOTS if bool(getattr(args, name, False))}
     if args.paper:
         selected |= PAPER_PLOTS
     if args.all:
@@ -485,6 +535,179 @@ def _desired_positions(data: dict[str, object]) -> np.ndarray:
     else:
         root_position = scenario.initial_positions[root]
     return root_position + scenario.reference.offsets
+
+
+def _desired_position_history(data: dict[str, object]) -> np.ndarray:
+    """Reconstruct the time-varying absolute position reference of every robot.
+
+    The root uses its logged absolute reference. Each follower reference is
+    reconstructed recursively from its parent's desired absolute position and
+    its logged parent-minus-follower formation reference.
+    """
+    arrays = data["arrays"]
+    graph = data["graph"]
+    trajectory = data["trajectory"]
+
+    times = np.asarray(arrays["times"], dtype=float)
+    positions = np.asarray(arrays["positions"], dtype=float)
+    root_reference = np.asarray(
+        arrays["reference_position"][:, graph.root],
+        dtype=float,
+    )
+    relative_reference = np.asarray(
+        arrays["desired_relative_position"],
+        dtype=float,
+    )
+
+    n_samples = times.size
+    n_agents = graph.n_agents
+    desired = np.full((n_samples, n_agents, 3), np.nan, dtype=float)
+
+    # Root: use the logged reference whenever available. During initialization
+    # a missing reference is intentionally left invisible rather than replaced
+    # by a fictitious desired point.
+    finite_root = np.all(np.isfinite(root_reference), axis=1)
+    desired[finite_root, graph.root] = root_reference[finite_root]
+
+    # Forward-fill references because they are piecewise constant between
+    # command updates and some exported samples may not repeat the value.
+    for k in range(1, n_samples):
+        if not np.all(np.isfinite(desired[k, graph.root])):
+            desired[k, graph.root] = desired[k - 1, graph.root]
+
+    # If the very first root reference is missing but later values exist,
+    # back-fill only up to the first valid sample.
+    valid_root_idx = np.flatnonzero(np.all(np.isfinite(desired[:, graph.root]), axis=1))
+    if valid_root_idx.size:
+        first = int(valid_root_idx[0])
+        desired[:first, graph.root] = desired[first, graph.root]
+
+    # Reconstruct each follower recursively along the directed tree:
+    # d_ij^d = p_j^d - p_i^d  =>  p_i^d = p_j^d - d_ij^d.
+    unresolved = set(range(n_agents)) - {graph.root}
+    while unresolved:
+        progress = False
+        for edge in graph:
+            observer = edge.observer
+            target = edge.target
+            if observer not in unresolved:
+                continue
+
+            rel = np.asarray(relative_reference[:, observer, :], dtype=float).copy()
+
+            # Forward-fill the piecewise-constant formation reference.
+            for k in range(1, n_samples):
+                if not np.all(np.isfinite(rel[k])):
+                    rel[k] = rel[k - 1]
+
+            valid_rel_idx = np.flatnonzero(np.all(np.isfinite(rel), axis=1))
+            if valid_rel_idx.size:
+                first = int(valid_rel_idx[0])
+                rel[:first] = rel[first]
+
+            parent = desired[:, target, :]
+            valid = np.all(np.isfinite(parent), axis=1) & np.all(
+                np.isfinite(rel), axis=1
+            )
+            if not np.any(valid):
+                continue
+
+            desired[valid, observer, :] = parent[valid] - rel[valid]
+            unresolved.remove(observer)
+            progress = True
+
+        if not progress:
+            break
+
+    # FormationTrajectory carries one repeated terminal state beyond the
+    # controller-history arrays, so mirror that convention here.
+    if trajectory.n_samples == n_samples + 1:
+        desired = np.concatenate((desired, desired[-1:]), axis=0)
+    elif trajectory.n_samples != n_samples:
+        raise ValueError(
+            "desired-position history cannot be aligned with trajectory samples"
+        )
+
+    return desired
+
+
+def _animation(
+    data: dict[str, object],
+    *,
+    frame_stride: int,
+    elevation: float,
+    azimuth: float,
+):
+    """Build a video-friendly 3-D animation from the exported ROS history."""
+    scenario = data["scenario"]
+    trajectory = data["trajectory"]
+    camera = data["camera"]
+    distance_domain = data["distance_domain"]
+    fov_domain = data["fov_domain"]
+    image_history = data["image_history"]
+    constraints = data["constraints_enabled"]
+    legacy = data["legacy"]
+
+    desired_history = _desired_position_history(data)
+    vehicle_geometry = BlueROV2HeavyVisualGeometry().wireframe()
+    followers = tuple(
+        agent for agent in range(scenario.n_agents) if agent != scenario.graph.root
+    )
+
+    edge_quality = None
+    try:
+        edge_quality = legacy.connection_quality_history(
+            scenario,
+            trajectory,
+            distance_domain,
+            fov_domain,
+            image_history,
+            distance_constraints=bool(constraints[0] or constraints[1]),
+            fov_constraints=bool(constraints[2] or constraints[3]),
+        )
+    except (AttributeError, ValueError):
+        pass
+
+    kwargs = {
+        "desired_position_history": desired_history,
+        "desired_vehicle_style": DesiredVehicleStyle3D(
+            color="0.45",
+            alpha=0.24,
+            linestyle="--",
+            linewidth_scale=0.85,
+        ),
+        "camera": camera,
+        "camera_agents": followers,
+        "camera_depth": 0.75,
+        "vehicle_geometry": vehicle_geometry,
+        "edge_quality": edge_quality,
+        "paper_quality": False,
+        "show_body_forward": False,
+        "trail_length": 250,
+        "frame_stride": frame_stride,
+        "elevation": elevation,
+        "azimuth": azimuth,
+        "title": "BlueROV2 formation-control experiment",
+    }
+
+    # Keep this script usable while formation_3d.py is being rolled out.
+    signature = inspect.signature(animate_formation_3d)
+    kwargs = {
+        key: value for key, value in kwargs.items() if key in signature.parameters
+    }
+
+    control_times = np.asarray(data["arrays"]["times"], dtype=float)
+    dt = float(np.median(np.diff(control_times)))
+    kwargs["interval_ms"] = max(1, int(round(1000.0 * dt * frame_stride)))
+
+    return (
+        animate_formation_3d(
+            trajectory,
+            scenario.graph,
+            **kwargs,
+        ),
+        dt,
+    )
 
 
 def _trajectory_figure(data: dict[str, object], paper_quality: bool):
@@ -528,7 +751,9 @@ def _trajectory_figure(data: dict[str, object], paper_quality: bool):
 
     # Keep compatibility if plot_formation_3d's optional keyword surface evolves.
     signature = inspect.signature(plot_formation_3d)
-    kwargs = {key: value for key, value in kwargs.items() if key in signature.parameters}
+    kwargs = {
+        key: value for key, value in kwargs.items() if key in signature.parameters
+    }
     result = plot_formation_3d(
         trajectory,
         scenario.graph,
@@ -536,6 +761,260 @@ def _trajectory_figure(data: dict[str, object], paper_quality: bool):
     )
     return result[0] if isinstance(result, tuple) else result
 
+
+def _edge_subscript(edge) -> str:
+    """Return the paper's 1-based edge subscript ``ij``."""
+    return f"{edge.observer + 1}{edge.target + 1}"
+
+
+def _distance_diagnostics_figure(
+    data: dict[str, object],
+    paper_quality: bool,
+) -> plt.Figure:
+    """Plot inter-robot distances and adaptive distance-domain boundaries.
+
+    Each sensing edge receives one color. The measured distance and both
+    adaptive boundaries for that edge use the same color, while line style
+    distinguishes the measured quantity from the adaptive limits.
+    """
+    scenario = data["scenario"]
+    trajectory = data["trajectory"]
+    distance_domain = data["distance_domain"]
+    rho_history = np.asarray(data["rho_history"], dtype=float)
+    adaptive = bool(data["adaptive"])
+
+    _apply_plot_style(paper_quality)
+    figure, axis = plt.subplots()
+
+    for edge in scenario.graph:
+        observer = edge.observer
+        target = edge.target
+        ij = _edge_subscript(edge)
+
+        relative = (
+            trajectory.positions[:, target, :] - trajectory.positions[:, observer, :]
+        )
+        distance = np.linalg.norm(relative, axis=1)
+
+        measured_line = axis.plot(
+            trajectory.times,
+            distance,
+            linestyle="-",
+            label=rf"$d_{{{ij}}}$",
+        )[0]
+        edge_color = measured_line.get_color()
+
+        if adaptive:
+            adaptive_minimum = np.array(
+                [
+                    distance_domain.effective_minimum_distance(value)
+                    for value in rho_history[:, observer, 0]
+                ],
+                dtype=float,
+            )
+            adaptive_maximum = np.array(
+                [
+                    distance_domain.effective_maximum_distance(value)
+                    for value in rho_history[:, observer, 1]
+                ],
+                dtype=float,
+            )
+
+            axis.plot(
+                trajectory.times,
+                adaptive_minimum,
+                linestyle="--",
+                color=edge_color,
+                alpha=0.85,
+                label=rf"$d_{{\min,{ij}}}^a$",
+            )
+            axis.plot(
+                trajectory.times,
+                adaptive_maximum,
+                linestyle="--",
+                color=edge_color,
+                alpha=0.85,
+                label=rf"$d_{{\max,{ij}}}^a$",
+            )
+
+    # Global physical and conservative bounds are edge independent.
+    axis.axhline(
+        distance_domain.d_min,
+        linestyle=":",
+        color="0.15",
+        linewidth=1.8,
+        label=r"$d_{\min}$",
+    )
+    axis.axhline(
+        distance_domain.d_max,
+        linestyle=":",
+        color="0.15",
+        linewidth=1.8,
+        label=r"$d_{\max}$",
+    )
+    axis.axhline(
+        distance_domain.d_min_conservative,
+        linestyle="-.",
+        color="0.50",
+        linewidth=1.8,
+        label=r"$d_{\min}^{c}$",
+    )
+    axis.axhline(
+        distance_domain.d_max_conservative,
+        linestyle="-.",
+        color="0.50",
+        linewidth=1.8,
+        label=r"$d_{\max}^{c}$",
+    )
+
+    axis.set_xlabel(r"$t$ [s]")
+    axis.set_ylabel(r"$d_{ij}$ [m]")
+    if not paper_quality:
+        axis.set_title("Inter-robot distance")
+    axis.grid(True, alpha=0.3)
+    axis.legend(
+        loc="lower center",
+        bbox_to_anchor=(0.5, 1.02),
+        ncol=4,
+        frameon=False,
+    )
+    figure.tight_layout()
+    return figure
+
+
+def _fov_diagnostics_figures(
+    data: dict[str, object],
+    paper_quality: bool,
+) -> tuple[plt.Figure, plt.Figure]:
+    """Plot horizontal and vertical normalized-image FoV constraints.
+
+    Each edge has one color. The measured normalized image coordinate and its
+    adaptive positive/negative FoV boundaries share that edge color.
+    """
+    scenario = data["scenario"]
+    trajectory = data["trajectory"]
+    fov_domain = data["fov_domain"]
+    rho_history = np.asarray(data["rho_history"], dtype=float)
+    image_history = np.asarray(data["image_history"], dtype=float)
+    adaptive = bool(data["adaptive"])
+
+    def make_component(
+        *,
+        component: int,
+        channel: int,
+        symbol: str,
+        conservative_limit: float,
+        title: str,
+    ) -> plt.Figure:
+        _apply_plot_style(paper_quality)
+        figure, axis = plt.subplots()
+
+        for edge in scenario.graph:
+            observer = edge.observer
+            ij = _edge_subscript(edge)
+
+            measured_line = axis.plot(
+                trajectory.times,
+                image_history[:, observer, component],
+                linestyle="-",
+                label=rf"$\alpha_{{{symbol},{ij}}}$",
+            )[0]
+            edge_color = measured_line.get_color()
+
+            if adaptive:
+                if component == 0:
+                    adaptive_limit = np.array(
+                        [
+                            fov_domain.effective_horizontal_limit(value)
+                            for value in rho_history[:, observer, channel]
+                        ],
+                        dtype=float,
+                    )
+                else:
+                    adaptive_limit = np.array(
+                        [
+                            fov_domain.effective_vertical_limit(value)
+                            for value in rho_history[:, observer, channel]
+                        ],
+                        dtype=float,
+                    )
+
+                axis.plot(
+                    trajectory.times,
+                    adaptive_limit,
+                    linestyle="--",
+                    color=edge_color,
+                    alpha=0.85,
+                    label=rf"$+\alpha_{{{symbol},{ij}}}^{{a}}$",
+                )
+                axis.plot(
+                    trajectory.times,
+                    -adaptive_limit,
+                    linestyle="--",
+                    color=edge_color,
+                    alpha=0.85,
+                    label=rf"$-\alpha_{{{symbol},{ij}}}^{{a}}$",
+                )
+
+        # Normalized image coordinates have physical FoV limits at +/- 1.
+        axis.axhline(
+            1.0,
+            linestyle=":",
+            color="0.15",
+            linewidth=1.8,
+            label=rf"$+\alpha_{{{symbol}}}$",
+        )
+        axis.axhline(
+            -1.0,
+            linestyle=":",
+            color="0.15",
+            linewidth=1.8,
+            label=rf"$-\alpha_{{{symbol}}}$",
+        )
+        axis.axhline(
+            conservative_limit,
+            linestyle="-.",
+            color="0.50",
+            linewidth=1.8,
+            label=rf"$+\alpha_{{{symbol}}}^c$",
+        )
+        axis.axhline(
+            -conservative_limit,
+            linestyle="-.",
+            color="0.50",
+            linewidth=1.8,
+            label=rf"$-\alpha_{{{symbol}}}^c$",
+        )
+
+        axis.set_xlabel(r"$t$ [s]")
+        axis.set_ylabel(rf"$\alpha_{{{symbol},ij}}$")
+        if not paper_quality:
+            axis.set_title(title)
+        axis.grid(True, alpha=0.3)
+        axis.legend(
+            loc="lower center",
+            bbox_to_anchor=(0.5, 1.02),
+            ncol=4,
+            frameon=False,
+        )
+        figure.tight_layout()
+        return figure
+
+    horizontal = make_component(
+        component=0,
+        channel=2,
+        symbol="h",
+        conservative_limit=fov_domain.alpha_h_conservative,
+        title="Horizontal field of view",
+    )
+    vertical = make_component(
+        component=1,
+        channel=3,
+        symbol="v",
+        conservative_limit=fov_domain.alpha_v_conservative,
+        title="Vertical field of view",
+    )
+    return horizontal, vertical
 
 
 def _formation_error_figure(data: dict[str, object], paper_quality: bool):
@@ -548,7 +1027,7 @@ def _formation_error_figure(data: dict[str, object], paper_quality: bool):
     positions = np.asarray(arrays["positions"], dtype=float)
     desired = np.asarray(arrays["desired_relative_position"], dtype=float)
 
-    apply_visualization_style(paper_quality=paper_quality)
+    _apply_plot_style(paper_quality)
     figure, axis = plt.subplots()
 
     plotted = False
@@ -556,16 +1035,11 @@ def _formation_error_figure(data: dict[str, object], paper_quality: bool):
         observer = edge.observer
         target = edge.target
 
-        actual_relative = (
-            positions[:, target, :] - positions[:, observer, :]
-        )
+        actual_relative = positions[:, target, :] - positions[:, observer, :]
         desired_relative = desired[:, observer, :]
         error_vector = actual_relative - desired_relative
 
-        valid = (
-            np.all(np.isfinite(error_vector), axis=1)
-            & np.isfinite(times)
-        )
+        valid = np.all(np.isfinite(error_vector), axis=1) & np.isfinite(times)
         if np.count_nonzero(valid) < 2:
             continue
 
@@ -589,8 +1063,6 @@ def _formation_error_figure(data: dict[str, object], paper_quality: bool):
         axis.legend()
     figure.tight_layout()
     return figure
-
-
 
 
 def _thruster_force_figures(
@@ -629,7 +1101,7 @@ def _thruster_force_figures(
             reverse_limit = np.nan
             forward_limit = np.nan
 
-        apply_visualization_style(paper_quality=paper_quality)
+        _apply_plot_style(paper_quality)
         figure, axis = plt.subplots()
 
         for thruster in range(values.shape[1]):
@@ -689,7 +1161,7 @@ def _leader_position_figure(data: dict[str, object], paper_quality: bool):
     if np.count_nonzero(valid) < 2:
         return None
 
-    apply_visualization_style(paper_quality=paper_quality)
+    _apply_plot_style(paper_quality)
     figure, axes = plt.subplots(3, 1, sharex=True)
     labels = ("x", "y", "z")
 
@@ -747,7 +1219,7 @@ def _formation_tracking_figures(
         if np.count_nonzero(valid) < 2:
             continue
 
-        apply_visualization_style(paper_quality=paper_quality)
+        _apply_plot_style(paper_quality)
         figure, axes = plt.subplots(3, 1, sharex=True)
 
         for axis_index, axis in enumerate(axes):
@@ -766,15 +1238,12 @@ def _formation_tracking_figures(
             axis.grid(True, alpha=0.3)
 
         axes[0].set_title(
-            "Formation tracking: "
-            f"{robots[observer]}->{robots[target]}"
+            "Formation tracking: " f"{robots[observer]}->{robots[target]}"
         )
         axes[0].legend()
         axes[-1].set_xlabel(r"$t$ [s]")
         figure.tight_layout()
-        figures[
-            f"formation_tracking_{robots[observer]}_to_{robots[target]}"
-        ] = figure
+        figures[f"formation_tracking_{robots[observer]}_to_{robots[target]}"] = figure
 
     return figures
 
@@ -893,7 +1362,7 @@ def _workspace_figures(
             s,
         )
 
-        apply_visualization_style(paper_quality=paper_quality)
+        _apply_plot_style(paper_quality)
         figure, axes = plt.subplots(3, 1, sharex=True)
 
         for axis_index, axis in enumerate(axes):
@@ -969,7 +1438,7 @@ def _workspace_relaxation_figures(
         if np.count_nonzero(valid) < 2:
             continue
 
-        apply_visualization_style(paper_quality=paper_quality)
+        _apply_plot_style(paper_quality)
         figure, axis = plt.subplots()
         for channel, name in enumerate(_WORKSPACE_NAMES):
             axis.plot(
@@ -1008,7 +1477,7 @@ def _leader_tracking_figure(data: dict[str, object], paper_quality: bool):
     if np.count_nonzero(valid_p) < 2:
         return None
 
-    apply_visualization_style(paper_quality=paper_quality)
+    _apply_plot_style(paper_quality)
     figure, (ax_p, ax_v) = plt.subplots(2, 1, sharex=True)
     ax_p.plot(times[valid_p], np.linalg.norm(p[valid_p] - p_ref[valid_p], axis=1))
     ax_p.set_ylabel(r"$\|p_0-p_r\|$ [m]")
@@ -1038,9 +1507,7 @@ def _print_summary(data: dict[str, object]) -> None:
     print(f"Robots: {', '.join(robots)}")
     print(
         "Edges: "
-        + ", ".join(
-            f"{robots[edge.observer]}->{robots[edge.target]}" for edge in graph
-        )
+        + ", ".join(f"{robots[edge.observer]}->{robots[edge.target]}" for edge in graph)
     )
 
     if followers:
@@ -1131,9 +1598,7 @@ def _print_summary(data: dict[str, object]) -> None:
             dtype=float,
         )
         for agent, robot in enumerate(robots):
-            finite_s = workspace_s[:, agent][
-                np.isfinite(workspace_s[:, agent])
-            ]
+            finite_s = workspace_s[:, agent][np.isfinite(workspace_s[:, agent])]
             finite_margin = workspace_margin[:, agent][
                 np.isfinite(workspace_margin[:, agent])
             ]
@@ -1151,13 +1616,9 @@ def _print_summary(data: dict[str, object]) -> None:
             if finite_margin.size or finite_s.size:
                 pieces = [f"Workspace {robot}:"]
                 if finite_margin.size:
-                    pieces.append(
-                        f"min physical margin {np.min(finite_margin):.4f} m"
-                    )
+                    pieces.append(f"min physical margin {np.min(finite_margin):.4f} m")
                 if finite_s.size:
-                    pieces.append(
-                        f"max relaxation {np.max(finite_s):.3f}"
-                    )
+                    pieces.append(f"max relaxation {np.max(finite_s):.3f}")
                 pieces.append(f"closest wall {closest_name}")
                 print(", ".join(pieces))
 
@@ -1180,10 +1641,7 @@ def _print_summary(data: dict[str, object]) -> None:
         )
     if np.any(valid_v):
         error = np.linalg.norm(v[valid_v] - v_ref[valid_v], axis=1)
-        print(
-            "Leader velocity tracking: "
-            f"RMS {np.sqrt(np.mean(error**2)):.4f} m/s"
-        )
+        print("Leader velocity tracking: " f"RMS {np.sqrt(np.mean(error**2)):.4f} m/s")
 
 
 def _save_figures(
@@ -1197,6 +1655,11 @@ def _save_figures(
     for name, figure in figures.items():
         if figure is None:
             continue
+
+        if paper_quality:
+            _apply_paper_quality_to_figure(figure)
+            figure.tight_layout()
+
         save_figure(
             figure,
             output_dir / f"{name}.{figure_format}",
@@ -1223,7 +1686,9 @@ def main() -> None:
     parser.add_argument("--paper", action="store_true", help="paper-oriented preset")
     parser.add_argument("--all", action="store_true", help="all available diagnostics")
     parser.add_argument("--trajectory", action="store_true")
-    parser.add_argument("--leader-tracking", dest="leader_tracking", action="store_true")
+    parser.add_argument(
+        "--leader-tracking", dest="leader_tracking", action="store_true"
+    )
     parser.add_argument(
         "--leader-position",
         dest="leader_position",
@@ -1268,6 +1733,33 @@ def main() -> None:
     parser.add_argument("--backstepping", action="store_true")
     parser.add_argument("--peak-debug", dest="peak_debug", action="store_true")
     parser.add_argument("--paper-quality", action="store_true")
+    parser.add_argument(
+        "--animation",
+        action="store_true",
+        help="create a 3-D formation animation with faint desired vehicles",
+    )
+    parser.add_argument(
+        "--animation-format",
+        choices=("mp4", "gif"),
+        default="mp4",
+    )
+    parser.add_argument(
+        "--animation-fps",
+        type=float,
+        default=None,
+        help=(
+            "saved animation FPS; default preserves real experiment time "
+            "given --frame-stride"
+        ),
+    )
+    parser.add_argument(
+        "--frame-stride",
+        type=int,
+        default=2,
+        help="use every N-th trajectory sample in the animation",
+    )
+    parser.add_argument("--animation-elevation", type=float, default=25.0)
+    parser.add_argument("--animation-azimuth", type=float, default=-60.0)
     parser.add_argument("--save", action="store_true")
     parser.add_argument("--show", action="store_true")
     parser.add_argument("--output-dir", type=Path, default=None)
@@ -1277,6 +1769,13 @@ def main() -> None:
         default="pdf",
     )
     args = parser.parse_args()
+
+    if args.paper_quality:
+        _apply_paper_quality_style()
+    if args.frame_stride <= 0:
+        parser.error("--frame-stride must be positive")
+    if args.animation_fps is not None and args.animation_fps <= 0.0:
+        parser.error("--animation-fps must be positive")
 
     history = FormationExperimentHistory.load(args.history)
     legacy = _load_legacy_module(args.repo_root.resolve())
@@ -1369,22 +1868,15 @@ def main() -> None:
             )
 
     if "distance" in selected:
-        figures["distance"] = legacy.plot_distance_diagnostics(
-            scenario,
-            trajectory,
-            distance_domain,
-            rho_history,
-            adaptive=adaptive,
+        figures["distance"] = _distance_diagnostics_figure(
+            data,
+            args.paper_quality,
         )
 
     if "fov" in selected:
-        horizontal, vertical = legacy.plot_fov_diagnostics(
-            scenario,
-            trajectory,
-            fov_domain,
-            rho_history,
-            image_history,
-            adaptive=adaptive,
+        horizontal, vertical = _fov_diagnostics_figures(
+            data,
+            args.paper_quality,
         )
         figures["fov_horizontal"] = horizontal
         figures["fov_vertical"] = vertical
@@ -1483,10 +1975,12 @@ def main() -> None:
         )
 
     if "backstepping" in selected:
-        figures["velocity_backstepping_split"] = legacy.plot_velocity_backstepping_split(
-            scenario,
-            trajectory,
-            clf,
+        figures["velocity_backstepping_split"] = (
+            legacy.plot_velocity_backstepping_split(
+                scenario,
+                trajectory,
+                clf,
+            )
         )
 
     if "peak_debug" in selected:
@@ -1517,6 +2011,16 @@ def main() -> None:
             clf,
         )
 
+    formation_animation = None
+    animation_dt = None
+    if args.animation:
+        formation_animation, animation_dt = _animation(
+            data,
+            frame_stride=args.frame_stride,
+            elevation=args.animation_elevation,
+            azimuth=args.animation_azimuth,
+        )
+
     if args.save:
         output_dir = args.output_dir or args.history.parent / "plots"
         _save_figures(
@@ -1526,12 +2030,31 @@ def main() -> None:
             args.paper_quality,
         )
 
+        if formation_animation is not None:
+            assert animation_dt is not None
+            fps = args.animation_fps
+            if fps is None:
+                fps = 1.0 / (animation_dt * args.frame_stride)
+            save_animation(
+                formation_animation.animation,
+                output_dir / f"formation_animation.{args.animation_format}",
+                paper_quality=False,
+                fps=fps,
+            )
+            print(
+                "Saved formation animation to "
+                f"{output_dir / f'formation_animation.{args.animation_format}'} "
+                f"at {fps:.3f} fps"
+            )
+
     if args.show:
         plt.show()
     else:
         for figure in figures.values():
             if figure is not None:
                 plt.close(figure)
+        if formation_animation is not None:
+            plt.close(formation_animation.figure)
 
 
 if __name__ == "__main__":
