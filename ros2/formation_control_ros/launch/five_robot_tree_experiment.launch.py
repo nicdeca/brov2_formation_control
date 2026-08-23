@@ -313,6 +313,7 @@ def generate_launch_description() -> LaunchDescription:
         "use_sim_time": ParameterValue(gazebo_timer, value_type=bool),
         "state_source": "px4",
         "control_space": "thruster",
+        "robot_configuration": "gazebo",
         "dry_run": dry_run,
         "virtual_linear_gain": ParameterValue(
             virtual_linear_gain,
