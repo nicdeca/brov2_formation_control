@@ -80,10 +80,16 @@ w = B f
 
 and physical thruster bounds enforced directly by the CLF-QP.
 
-The default dynamics preset is `gazebo`, which reduces the active SITL SDF's
-base and eight thruster links to one rigid body and reproduces its buoyancy,
-added-mass, and damping values. The characterized real-robot presets
-`standard` and `heavy_tube` remain selectable explicitly.
+Three dynamics presets are available:
+
+- `gazebo`: parameters matching the current PX4/Gazebo SITL model;
+- `standard`: characterized standard laboratory BlueROV2 configuration;
+- `heavy_tube`: characterized heavy-tube laboratory configuration.
+
+SITL launch files explicitly select `gazebo`. For real experiments, the ROS
+layer can select the characterized preset automatically from the robot name:
+`glub -> heavy_tube`, `splash -> heavy_tube`, and `bubble -> standard`.
+The presets can also be selected explicitly.
 
 ### Formation and sensing constraints
 
@@ -129,16 +135,24 @@ rotational virtual-speed limit:    2.0 rad/s
 
 ### Adaptive sensing domain
 
-When the conservative sensing domain becomes too restrictive under limited actuation, the controller can temporarily enlarge it toward the physical domain.
-
-For each constraint,
+When limited actuation makes the conservative sensing domain too restrictive,
+the controller can temporarily enlarge only the active constraint domains
+toward their physical limits. For each constraint,
 
 ```text
-h_a = h_c + rho_bar s,
-s in [0, 1].
+h_a = h_c + rho_bar s
 ```
 
-The auxiliary state `s` is governed by a CBF-like condition that maintains a positive physical margin. When the enlargement is no longer needed, the nominal dynamics recover `s -> 0`.
+and the adaptive barrier includes an auxiliary repulsive potential that is
+smoothly activated near a prescribed positive margin. Its contribution becomes
+unbounded as the adaptive constraint approaches that margin, so the adaptation
+does not require the parent velocity or `h_c_dot`. A recovery term drives
+`s -> 0` when enlargement is no longer needed. The state is kept nonnegative
+but is intentionally not clipped at one; values beyond the physical-domain
+threshold are therefore directly visible in the diagnostics.
+
+See [Controller parameters](docs/experiments/controller_parameters.md) for the
+current adaptation parameters and interpretation.
 
 ## Installation
 
@@ -217,6 +231,7 @@ ros2 launch formation_control_ros two_robot_experiment.launch.py \
 The complete procedures are documented in:
 
 - [SITL setup](docs/experiments/simulation_setup.md)
+- [Launch-file parameters](docs/experiments/launch_parameters.md)
 - [Two-robot experiment](docs/experiments/two_robot_experiment.md)
 - [Three-robot experiment](docs/experiments/three_robot_experiment.md)
 - [Hardware setup and safety](docs/experiments/hardware_setup.md)
@@ -239,7 +254,7 @@ python scripts/export_formation_bag.py outputs/experiments/<run>
 
 uv run python scripts/plot_formation_experiment.py \
   outputs/experiments/<run>/formation_history.npz \
-  --paper --paper-quality --save
+  --paper --paper-quality --save --format pdf
 ```
 
 See [ROS experiment logging and paper-plot pipeline](docs/experiment_logging.md)
@@ -444,10 +459,10 @@ docs/experiments/         # reproducible SITL and hardware procedures
 
 ## Current development status
 
-The control core, ROS 2 adapter, PX4/Gazebo SITL workflow, and experiment
-logging pipeline are implemented. Three-robot SITL and the two-robot `cautious`
-and `full` profiles have been validated. Real-water validation remains the next
-major milestone.
+The control core, ROS 2 adapter, PX4/Gazebo SITL workflow, experiment
+logging/plotting pipeline, five-robot SITL scenario, and real-water experiment
+workflow are implemented. The current validation uses the same controller
+architecture in SITL and on the laboratory BlueROV2 vehicles.
 
 Current milestones:
 
@@ -468,7 +483,7 @@ Current milestones:
 - [x] PX4/Gazebo multi-robot SITL integration
 - [x] two- and three-robot SITL experiment workflows
 - [x] rosbag recording, portable export, and paper-plot pipeline
-- [ ] BlueROV2 experimental validation
+- [x] BlueROV2 experimental validation
 
 ## Experiment architecture and safety
 

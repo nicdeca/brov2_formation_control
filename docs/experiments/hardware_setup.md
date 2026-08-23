@@ -70,6 +70,23 @@ Do not proceed if the controller reports:
 normalized image coordinates require strictly positive camera depth
 ```
 
+
+## Robot dynamics configuration
+
+For the currently characterized laboratory vehicles:
+
+```text
+glub    -> heavy_tube
+splash  -> heavy_tube
+bubble  -> standard
+```
+
+`two_robot_experiment.launch.py` defaults the leader and follower dynamics
+selection to `auto`, which applies this mapping from the supplied robot names.
+Unknown names fail explicitly; set `leader_robot_configuration` and
+`follower_robot_configuration` manually for any other vehicle. See
+`launch_parameters.md` for the complete launch interface.
+
 ## 5. Measure the real tank workspace
 
 Update the launch parameters for:
