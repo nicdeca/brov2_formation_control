@@ -195,18 +195,20 @@ def generate_launch_description() -> LaunchDescription:
             ),
             DeclareLaunchArgument(
                 "leader_robot_configuration",
-                default_value="standard",
+                default_value="auto",
                 description=(
                     "Dynamics preset for the leader: "
-                    "'gazebo', 'standard', or 'heavy_tube'."
+                    "'auto', 'gazebo', 'standard', or 'heavy_tube'. "
+                    "Auto maps glub/splash to heavy_tube and bubble to standard."
                 ),
             ),
             DeclareLaunchArgument(
                 "follower_robot_configuration",
-                default_value="standard",
+                default_value="auto",
                 description=(
                     "Dynamics preset for the follower: "
-                    "'gazebo', 'standard', or 'heavy_tube'."
+                    "'auto', 'gazebo', 'standard', or 'heavy_tube'. "
+                    "Auto maps glub/splash to heavy_tube and bubble to standard."
                 ),
             ),
             DeclareLaunchArgument(
