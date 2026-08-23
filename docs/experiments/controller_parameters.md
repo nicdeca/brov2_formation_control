@@ -5,9 +5,18 @@ controller.
 
 ## Robot dynamics preset
 
-`robot_configuration` selects `gazebo`, `standard`, or `heavy_tube`. Generic
-nodes default to `gazebo`. Real-experiment launch files should set the
-characterized preset independently for each vehicle.
+The model presets are `gazebo`, `standard`, and `heavy_tube`.
+
+- `gazebo`: current PX4/Gazebo SITL dynamics;
+- `standard`: characterized standard laboratory configuration;
+- `heavy_tube`: characterized heavy-tube configuration.
+
+The ROS layer also accepts `auto`, which maps `glub` and `splash` to
+`heavy_tube` and `bubble` to `standard`. Unknown names fail explicitly in
+`auto` mode. Five-robot SITL uses `gazebo` explicitly; the real two-robot
+launch defaults each robot to `auto`.
+
+See `launch_parameters.md` for the launch-file interface.
 
 ## Geometric/task gains
 
@@ -154,6 +163,18 @@ The adaptive sensing state has four channels:
 ```text
 [collision, range, horizontal_fov, vertical_fov]
 ```
+
+The current sensing adaptation is derivative-free with respect to parent
+motion. Each adaptive constraint uses a smooth activation of an auxiliary
+barrier potential near a positive margin. The potential becomes unbounded as
+the adaptive constraint approaches that margin, while a recovery term drives
+the enlargement state back toward zero away from the boundary. Consequently,
+the mechanism does not require the parent velocity or `h_c_dot`.
+
+The enlargement state is constrained to remain nonnegative but is not clipped
+to `[0,1]`. Reaching `s=1` places the zero level set at the corresponding
+physical limit; larger values therefore indicate enlargement beyond that
+nominal physical-domain span and must be monitored in the diagnostics.
 
 ## Initialization handoff
 
