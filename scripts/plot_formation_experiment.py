@@ -33,6 +33,7 @@ from types import ModuleType
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.animation import FuncAnimation
 
 from formation_control.actuation import (
     BlueROV2HeavyThrusterAllocation,
@@ -62,6 +63,7 @@ from formation_control.visualization.formation_3d import (
 from formation_control.visualization.domain_relaxation_plot import (
     plot_vertical_fov_relaxation_from_histories,
 )
+
 
 PAPER_PLOTS = {
     "trajectory",
@@ -102,7 +104,7 @@ def _apply_paper_quality_style() -> None:
             "ytick.labelsize": 15,
             "legend.fontsize": 14,
             "figure.titlesize": 17,
-            "lines.linewidth": 3.0,
+            "lines.linewidth": 2.0,
             "axes.linewidth": 1.2,
             "xtick.major.width": 1.2,
             "ytick.major.width": 1.2,
@@ -334,7 +336,9 @@ def _build_legacy_data(
         (control_times, np.array([control_times[-1] + dt]))
     )
     positions = _extend_state_history(np.asarray(arrays["positions"], dtype=float))
-    quaternions = _extend_state_history(np.asarray(arrays["quaternions"], dtype=float))
+    quaternions = _extend_state_history(
+        np.asarray(arrays["quaternions"], dtype=float)
+    )
     velocity_world = _world_linear_velocity(
         np.asarray(arrays["quaternions"], dtype=float),
         np.asarray(arrays["linear_velocity_body"], dtype=float),
@@ -388,20 +392,14 @@ def _build_legacy_data(
     )
     s_history_extended = _extend_state_history(s_history)
 
-    constraints = (
-        _first_finite_vector(
-            arrays["constraints_enabled"],
-            first_follower,
-        )
-        > 0.5
-    )
-    adaptive = (
-        _first_finite_scalar(
-            arrays["adaptive_enabled"],
-            first_follower,
-        )
-        > 0.5
-    )
+    constraints = _first_finite_vector(
+        arrays["constraints_enabled"],
+        first_follower,
+    ) > 0.5
+    adaptive = _first_finite_scalar(
+        arrays["adaptive_enabled"],
+        first_follower,
+    ) > 0.5
     domain_margin_ratio = _first_finite_scalar(
         arrays["domain_margin_ratio"],
         first_follower,
@@ -418,7 +416,9 @@ def _build_legacy_data(
         "velocity_backstepping_rate": np.asarray(
             arrays["clf_velocity_backstepping_rate"], dtype=float
         ),
-        "dynamics_bias_rate": np.asarray(arrays["clf_dynamics_bias_rate"], dtype=float),
+        "dynamics_bias_rate": np.asarray(
+            arrays["clf_dynamics_bias_rate"], dtype=float
+        ),
         "dynamics_bias_linear_rate": np.asarray(
             arrays["clf_dynamics_bias_linear_rate"], dtype=float
         ),
@@ -452,9 +452,15 @@ def _build_legacy_data(
         "filtered_angular_acceleration_norm": np.asarray(
             arrays["clf_filtered_angular_acceleration_norm"], dtype=float
         ),
-        "generalized_velocity": np.asarray(arrays["generalized_velocity"], dtype=float),
-        "filtered_velocity": np.asarray(arrays["filtered_velocity"], dtype=float),
-        "desired_velocity": np.asarray(arrays["desired_velocity"], dtype=float),
+        "generalized_velocity": np.asarray(
+            arrays["generalized_velocity"], dtype=float
+        ),
+        "filtered_velocity": np.asarray(
+            arrays["filtered_velocity"], dtype=float
+        ),
+        "desired_velocity": np.asarray(
+            arrays["desired_velocity"], dtype=float
+        ),
         "filtered_velocity_derivative": np.asarray(
             arrays["filtered_velocity_derivative"], dtype=float
         ),
@@ -465,16 +471,17 @@ def _build_legacy_data(
         "minimum_modeled_derivative": np.asarray(
             arrays["clf_minimum_modeled_derivative"], dtype=float
         ),
-        "hard_clf_residual": np.asarray(arrays["clf_hard_residual"], dtype=float),
+        "hard_clf_residual": np.asarray(
+            arrays["clf_hard_residual"], dtype=float
+        ),
     }
     # The current pure-Python example also stores the pre-saturation virtual
     # command, but schema v1 intentionally does not because no existing ROS
     # plot requires it.  Supply explicit NaNs only when that legacy dataclass
     # version requires the field.
-    if (
-        "unlimited_desired_velocity"
-        in inspect.signature(legacy.CLFDiagnosticHistory).parameters
-    ):
+    if "unlimited_desired_velocity" in inspect.signature(
+        legacy.CLFDiagnosticHistory
+    ).parameters:
         clf_kwargs["unlimited_desired_velocity"] = np.full_like(
             np.asarray(arrays["desired_velocity"], dtype=float),
             np.nan,
@@ -497,7 +504,9 @@ def _build_legacy_data(
         "fov_domain": fov_domain,
         "rho_history": rho_history,
         "s_history": s_history_extended,
-        "relaxation_rate_history": np.asarray(arrays["relaxation_rate"], dtype=float),
+        "relaxation_rate_history": np.asarray(
+            arrays["relaxation_rate"], dtype=float
+        ),
         "image_history": image_history,
         "slacks": np.asarray(arrays["slack"], dtype=float),
         "required_slacks": np.asarray(arrays["required_slack"], dtype=float),
@@ -513,7 +522,9 @@ def _build_legacy_data(
 
 
 def _selected_plots(args: argparse.Namespace) -> set[str]:
-    selected = {name for name in ALL_PLOTS if bool(getattr(args, name, False))}
+    selected = {
+        name for name in ALL_PLOTS if bool(getattr(args, name, False))
+    }
     if args.paper:
         selected |= PAPER_PLOTS
     if args.all:
@@ -577,7 +588,9 @@ def _desired_position_history(data: dict[str, object]) -> np.ndarray:
 
     # If the very first root reference is missing but later values exist,
     # back-fill only up to the first valid sample.
-    valid_root_idx = np.flatnonzero(np.all(np.isfinite(desired[:, graph.root]), axis=1))
+    valid_root_idx = np.flatnonzero(
+        np.all(np.isfinite(desired[:, graph.root]), axis=1)
+    )
     if valid_root_idx.size:
         first = int(valid_root_idx[0])
         desired[:first, graph.root] = desired[first, graph.root]
@@ -606,8 +619,9 @@ def _desired_position_history(data: dict[str, object]) -> np.ndarray:
                 rel[:first] = rel[first]
 
             parent = desired[:, target, :]
-            valid = np.all(np.isfinite(parent), axis=1) & np.all(
-                np.isfinite(rel), axis=1
+            valid = (
+                np.all(np.isfinite(parent), axis=1)
+                & np.all(np.isfinite(rel), axis=1)
             )
             if not np.any(valid):
                 continue
@@ -651,7 +665,9 @@ def _animation(
     desired_history = _desired_position_history(data)
     vehicle_geometry = BlueROV2HeavyVisualGeometry().wireframe()
     followers = tuple(
-        agent for agent in range(scenario.n_agents) if agent != scenario.graph.root
+        agent
+        for agent in range(scenario.n_agents)
+        if agent != scenario.graph.root
     )
 
     edge_quality = None
@@ -693,21 +709,20 @@ def _animation(
     # Keep this script usable while formation_3d.py is being rolled out.
     signature = inspect.signature(animate_formation_3d)
     kwargs = {
-        key: value for key, value in kwargs.items() if key in signature.parameters
+        key: value
+        for key, value in kwargs.items()
+        if key in signature.parameters
     }
 
     control_times = np.asarray(data["arrays"]["times"], dtype=float)
     dt = float(np.median(np.diff(control_times)))
     kwargs["interval_ms"] = max(1, int(round(1000.0 * dt * frame_stride)))
 
-    return (
-        animate_formation_3d(
-            trajectory,
-            scenario.graph,
-            **kwargs,
-        ),
-        dt,
-    )
+    return animate_formation_3d(
+        trajectory,
+        scenario.graph,
+        **kwargs,
+    ), dt
 
 
 def _trajectory_figure(data: dict[str, object], paper_quality: bool):
@@ -751,9 +766,7 @@ def _trajectory_figure(data: dict[str, object], paper_quality: bool):
 
     # Keep compatibility if plot_formation_3d's optional keyword surface evolves.
     signature = inspect.signature(plot_formation_3d)
-    kwargs = {
-        key: value for key, value in kwargs.items() if key in signature.parameters
-    }
+    kwargs = {key: value for key, value in kwargs.items() if key in signature.parameters}
     result = plot_formation_3d(
         trajectory,
         scenario.graph,
@@ -762,14 +775,450 @@ def _trajectory_figure(data: dict[str, object], paper_quality: bool):
     return result[0] if isinstance(result, tuple) else result
 
 
+
+
 def _edge_subscript(edge) -> str:
     """Return the paper's 1-based edge subscript ``ij``."""
     return f"{edge.observer + 1}{edge.target + 1}"
 
 
+
+def _animation_frame_indices(n_samples: int, frame_stride: int) -> list[int]:
+    indices = list(range(0, n_samples, frame_stride))
+    if indices[-1] != n_samples - 1:
+        indices.append(n_samples - 1)
+    return indices
+
+
+def _finite_ylim(
+    series: list[np.ndarray],
+    *,
+    padding_fraction: float = 0.08,
+) -> tuple[float, float]:
+    values = np.concatenate(
+        [
+            np.asarray(value, dtype=float).reshape(-1)
+            for value in series
+            if np.asarray(value).size
+        ]
+    )
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return -1.0, 1.0
+    lower = float(np.min(values))
+    upper = float(np.max(values))
+    span = upper - lower
+    if span <= 1e-12:
+        span = max(abs(lower), 1.0)
+    padding = padding_fraction * span
+    return lower - padding, upper + padding
+
+
+def _formation_error_animation(
+    data: dict[str, object],
+    *,
+    paper_quality: bool,
+    frame_stride: int,
+    show_legends: bool,
+):
+    """Animate formation-error norms with a fixed time axis and moving cursor."""
+    arrays = data["arrays"]
+    graph = data["graph"]
+    robots = data["robots"]
+
+    times = np.asarray(arrays["times"], dtype=float)
+    positions = np.asarray(arrays["positions"], dtype=float)
+    desired = np.asarray(arrays["desired_relative_position"], dtype=float)
+
+    _apply_plot_style(paper_quality)
+    figure, axis = plt.subplots()
+
+    line_specs = []
+    all_values: list[np.ndarray] = []
+    for edge in graph:
+        observer = edge.observer
+        target = edge.target
+        error_vector = (
+            positions[:, target, :]
+            - positions[:, observer, :]
+            - desired[:, observer, :]
+        )
+        error_norm = np.linalg.norm(error_vector, axis=1)
+        valid = np.all(np.isfinite(error_vector), axis=1) & np.isfinite(times)
+        values = np.full_like(times, np.nan, dtype=float)
+        values[valid] = error_norm[valid]
+        ij = _edge_subscript(edge)
+        line = axis.plot([], [], label=rf"$\|\tilde{{\boldsymbol{{p}}}}_{{{ij}}}\|$")[0]
+        line_specs.append((line, values))
+        all_values.append(values)
+
+    axis.set_xlim(float(times[0]), float(times[-1]))
+    lower, upper = _finite_ylim(all_values)
+    axis.set_ylim(max(0.0, lower), upper)
+    axis.set_xlabel(r"$t$ [s]")
+    axis.set_ylabel(r"$\|\tilde{\boldsymbol{p}}_{ij}\|$ [m]")
+    if not paper_quality:
+        axis.set_title("Formation error")
+    axis.grid(True, alpha=0.3)
+    if show_legends:
+        axis.legend(
+            loc="lower center",
+            bbox_to_anchor=(0.5, 1.02),
+            ncol=min(4, max(1, len(line_specs))),
+            frameon=False,
+        )
+    cursor = axis.axvline(times[0], color="0.35", linewidth=1.2, alpha=0.8)
+    time_text = axis.text(
+        0.985,
+        0.04,
+        "",
+        transform=axis.transAxes,
+        ha="right",
+        va="bottom",
+    )
+    figure.tight_layout()
+
+    frames = _animation_frame_indices(len(times), frame_stride)
+
+    def update(frame: int):
+        for line, values in line_specs:
+            line.set_data(times[: frame + 1], values[: frame + 1])
+        cursor.set_xdata([times[frame], times[frame]])
+        time_text.set_text(rf"$t={times[frame]:.1f}\,\mathrm{{s}}$")
+        return [
+            *(line for line, _ in line_specs),
+            cursor,
+            time_text,
+        ]
+
+    animation = FuncAnimation(
+        figure,
+        update,
+        frames=frames,
+        interval=30,
+        blit=False,
+        repeat=False,
+    )
+    return figure, animation
+
+
+def _distance_diagnostics_animation(
+    data: dict[str, object],
+    *,
+    paper_quality: bool,
+    frame_stride: int,
+    show_legends: bool,
+):
+    """Animate measured distances and adaptive distance boundaries."""
+    scenario = data["scenario"]
+    trajectory = data["trajectory"]
+    distance_domain = data["distance_domain"]
+    rho_history = np.asarray(data["rho_history"], dtype=float)
+    adaptive = bool(data["adaptive"])
+    times = np.asarray(trajectory.times, dtype=float)
+
+    _apply_plot_style(paper_quality)
+    figure, axis = plt.subplots()
+
+    animated_lines = []
+    all_values: list[np.ndarray] = []
+
+    for edge in scenario.graph:
+        observer = edge.observer
+        target = edge.target
+        ij = _edge_subscript(edge)
+
+        relative = (
+            trajectory.positions[:, target, :]
+            - trajectory.positions[:, observer, :]
+        )
+        distance = np.linalg.norm(relative, axis=1)
+        measured = axis.plot([], [], linestyle="-", label=rf"$d_{{{ij}}}$")[0]
+        color = measured.get_color()
+        animated_lines.append((measured, distance))
+        all_values.append(distance)
+
+        if adaptive:
+            adaptive_minimum = np.array(
+                [
+                    distance_domain.effective_minimum_distance(value)
+                    for value in rho_history[:, observer, 0]
+                ],
+                dtype=float,
+            )
+            adaptive_maximum = np.array(
+                [
+                    distance_domain.effective_maximum_distance(value)
+                    for value in rho_history[:, observer, 1]
+                ],
+                dtype=float,
+            )
+            line_min = axis.plot(
+                [], [], "--", color=color, alpha=0.85,
+                label=rf"$d_{{\min,{ij}}}^a$",
+            )[0]
+            line_max = axis.plot(
+                [], [], "--", color=color, alpha=0.85,
+                label=rf"$d_{{\max,{ij}}}^a$",
+            )[0]
+            animated_lines.extend(
+                [(line_min, adaptive_minimum), (line_max, adaptive_maximum)]
+            )
+            all_values.extend([adaptive_minimum, adaptive_maximum])
+
+    for value, label, linestyle, color in (
+        (distance_domain.d_min, r"$d_{\min}$", ":", "0.15"),
+        (distance_domain.d_max, r"$d_{\max}$", ":", "0.15"),
+        (
+            distance_domain.d_min_conservative,
+            r"$d_{\min}^{c}$",
+            "-.",
+            "0.50",
+        ),
+        (
+            distance_domain.d_max_conservative,
+            r"$d_{\max}^{c}$",
+            "-.",
+            "0.50",
+        ),
+    ):
+        axis.axhline(
+            value,
+            linestyle=linestyle,
+            color=color,
+            linewidth=1.8,
+            label=label,
+        )
+        all_values.append(np.array([value]))
+
+    axis.set_xlim(float(times[0]), float(times[-1]))
+    axis.set_ylim(*_finite_ylim(all_values))
+    axis.set_xlabel(r"$t$ [s]")
+    axis.set_ylabel(r"$d_{ij}$ [m]")
+    if not paper_quality:
+        axis.set_title("Inter-robot distance")
+    axis.grid(True, alpha=0.3)
+    if show_legends:
+        axis.legend(
+            loc="lower center",
+            bbox_to_anchor=(0.5, 1.02),
+            ncol=4,
+            frameon=False,
+        )
+    cursor = axis.axvline(times[0], color="0.35", linewidth=1.2, alpha=0.8)
+    time_text = axis.text(
+        0.985, 0.04, "", transform=axis.transAxes, ha="right", va="bottom"
+    )
+    figure.tight_layout()
+
+    frames = _animation_frame_indices(len(times), frame_stride)
+
+    def update(frame: int):
+        for line, values in animated_lines:
+            line.set_data(times[: frame + 1], values[: frame + 1])
+        cursor.set_xdata([times[frame], times[frame]])
+        time_text.set_text(rf"$t={times[frame]:.1f}\,\mathrm{{s}}$")
+        return [
+            *(line for line, _ in animated_lines),
+            cursor,
+            time_text,
+        ]
+
+    animation = FuncAnimation(
+        figure,
+        update,
+        frames=frames,
+        interval=30,
+        blit=False,
+        repeat=False,
+    )
+    return figure, animation
+
+
+def _fov_diagnostics_animations(
+    data: dict[str, object],
+    *,
+    paper_quality: bool,
+    frame_stride: int,
+    show_legends: bool,
+):
+    """Animate horizontal and vertical FoV measurements/adaptive bounds."""
+    scenario = data["scenario"]
+    trajectory = data["trajectory"]
+    fov_domain = data["fov_domain"]
+    rho_history = np.asarray(data["rho_history"], dtype=float)
+    image_history = np.asarray(data["image_history"], dtype=float)
+    adaptive = bool(data["adaptive"])
+    times = np.asarray(trajectory.times, dtype=float)
+
+    def build(
+        *,
+        component: int,
+        channel: int,
+        symbol: str,
+        conservative_limit: float,
+        title: str,
+    ):
+        _apply_plot_style(paper_quality)
+        figure, axis = plt.subplots()
+        animated_lines = []
+        all_values: list[np.ndarray] = [
+            np.array([-1.0, 1.0, -conservative_limit, conservative_limit])
+        ]
+
+        for edge in scenario.graph:
+            observer = edge.observer
+            ij = _edge_subscript(edge)
+            measured_values = image_history[:, observer, component]
+            measured = axis.plot(
+                [],
+                [],
+                "-",
+                label=rf"$\alpha_{{{symbol},{ij}}}$",
+            )[0]
+            color = measured.get_color()
+            animated_lines.append((measured, measured_values))
+            all_values.append(measured_values)
+
+            if adaptive:
+                if component == 0:
+                    adaptive_limit = np.array(
+                        [
+                            fov_domain.effective_horizontal_limit(value)
+                            for value in rho_history[:, observer, channel]
+                        ],
+                        dtype=float,
+                    )
+                else:
+                    adaptive_limit = np.array(
+                        [
+                            fov_domain.effective_vertical_limit(value)
+                            for value in rho_history[:, observer, channel]
+                        ],
+                        dtype=float,
+                    )
+                line_pos = axis.plot(
+                    [],
+                    [],
+                    "--",
+                    color=color,
+                    alpha=0.85,
+                    label=rf"$+\alpha_{{{symbol},{ij}}}^{{a}}$",
+                )[0]
+                line_neg = axis.plot(
+                    [],
+                    [],
+                    "--",
+                    color=color,
+                    alpha=0.85,
+                    label=rf"$-\alpha_{{{symbol},{ij}}}^{{a}}$",
+                )[0]
+                animated_lines.extend(
+                    [(line_pos, adaptive_limit), (line_neg, -adaptive_limit)]
+                )
+                all_values.extend([adaptive_limit, -adaptive_limit])
+
+        axis.axhline(
+            1.0,
+            linestyle=":",
+            color="0.15",
+            linewidth=1.8,
+            label=rf"$+\alpha_{{{symbol}}}$",
+        )
+        axis.axhline(
+            -1.0,
+            linestyle=":",
+            color="0.15",
+            linewidth=1.8,
+            label=rf"$-\alpha_{{{symbol}}}$",
+        )
+        axis.axhline(
+            conservative_limit,
+            linestyle="-.",
+            color="0.50",
+            linewidth=1.8,
+            label=rf"$+\alpha_{{{symbol}}}^c$",
+        )
+        axis.axhline(
+            -conservative_limit,
+            linestyle="-.",
+            color="0.50",
+            linewidth=1.8,
+            label=rf"$-\alpha_{{{symbol}}}^c$",
+        )
+
+        axis.set_xlim(float(times[0]), float(times[-1]))
+        axis.set_ylim(*_finite_ylim(all_values))
+        axis.set_xlabel(r"$t$ [s]")
+        axis.set_ylabel(rf"$\alpha_{{{symbol},ij}}$")
+        if not paper_quality:
+            axis.set_title(title)
+        axis.grid(True, alpha=0.3)
+        if show_legends:
+            axis.legend(
+                loc="lower center",
+                bbox_to_anchor=(0.5, 1.02),
+                ncol=4,
+                frameon=False,
+            )
+        cursor = axis.axvline(
+            times[0], color="0.35", linewidth=1.2, alpha=0.8
+        )
+        time_text = axis.text(
+            0.985,
+            0.04,
+            "",
+            transform=axis.transAxes,
+            ha="right",
+            va="bottom",
+        )
+        figure.tight_layout()
+
+        frames = _animation_frame_indices(len(times), frame_stride)
+
+        def update(frame: int):
+            for line, values in animated_lines:
+                line.set_data(times[: frame + 1], values[: frame + 1])
+            cursor.set_xdata([times[frame], times[frame]])
+            time_text.set_text(rf"$t={times[frame]:.1f}\,\mathrm{{s}}$")
+            return [
+                *(line for line, _ in animated_lines),
+                cursor,
+                time_text,
+            ]
+
+        animation = FuncAnimation(
+            figure,
+            update,
+            frames=frames,
+            interval=30,
+            blit=False,
+            repeat=False,
+        )
+        return figure, animation
+
+    return {
+        "fov_horizontal": build(
+            component=0,
+            channel=2,
+            symbol="h",
+            conservative_limit=fov_domain.alpha_h_conservative,
+            title="Horizontal field of view",
+        ),
+        "fov_vertical": build(
+            component=1,
+            channel=3,
+            symbol="v",
+            conservative_limit=fov_domain.alpha_v_conservative,
+            title="Vertical field of view",
+        ),
+    }
+
+
 def _distance_diagnostics_figure(
     data: dict[str, object],
     paper_quality: bool,
+    show_legends: bool,
 ) -> plt.Figure:
     """Plot inter-robot distances and adaptive distance-domain boundaries.
 
@@ -792,7 +1241,8 @@ def _distance_diagnostics_figure(
         ij = _edge_subscript(edge)
 
         relative = (
-            trajectory.positions[:, target, :] - trajectory.positions[:, observer, :]
+            trajectory.positions[:, target, :]
+            - trajectory.positions[:, observer, :]
         )
         distance = np.linalg.norm(relative, axis=1)
 
@@ -872,12 +1322,13 @@ def _distance_diagnostics_figure(
     if not paper_quality:
         axis.set_title("Inter-robot distance")
     axis.grid(True, alpha=0.3)
-    axis.legend(
-        loc="lower center",
-        bbox_to_anchor=(0.5, 1.02),
-        ncol=4,
-        frameon=False,
-    )
+    if show_legends:
+        axis.legend(
+            loc="lower center",
+            bbox_to_anchor=(0.5, 1.02),
+            ncol=4,
+            frameon=False,
+        )
     figure.tight_layout()
     return figure
 
@@ -885,6 +1336,7 @@ def _distance_diagnostics_figure(
 def _fov_diagnostics_figures(
     data: dict[str, object],
     paper_quality: bool,
+    show_legends: bool,
 ) -> tuple[plt.Figure, plt.Figure]:
     """Plot horizontal and vertical normalized-image FoV constraints.
 
@@ -991,12 +1443,13 @@ def _fov_diagnostics_figures(
         if not paper_quality:
             axis.set_title(title)
         axis.grid(True, alpha=0.3)
-        axis.legend(
-            loc="lower center",
-            bbox_to_anchor=(0.5, 1.02),
-            ncol=4,
-            frameon=False,
-        )
+        if show_legends:
+            axis.legend(
+                loc="lower center",
+                bbox_to_anchor=(0.5, 1.02),
+                ncol=4,
+                frameon=False,
+            )
         figure.tight_layout()
         return figure
 
@@ -1017,7 +1470,7 @@ def _fov_diagnostics_figures(
     return horizontal, vertical
 
 
-def _formation_error_figure(data: dict[str, object], paper_quality: bool):
+def _formation_error_figure(data: dict[str, object], paper_quality: bool, show_legends: bool):
     """Plot ||(p_target-p_observer)-d_des|| for every directed follower edge."""
     arrays = data["arrays"]
     graph = data["graph"]
@@ -1035,11 +1488,16 @@ def _formation_error_figure(data: dict[str, object], paper_quality: bool):
         observer = edge.observer
         target = edge.target
 
-        actual_relative = positions[:, target, :] - positions[:, observer, :]
+        actual_relative = (
+            positions[:, target, :] - positions[:, observer, :]
+        )
         desired_relative = desired[:, observer, :]
         error_vector = actual_relative - desired_relative
 
-        valid = np.all(np.isfinite(error_vector), axis=1) & np.isfinite(times)
+        valid = (
+            np.all(np.isfinite(error_vector), axis=1)
+            & np.isfinite(times)
+        )
         if np.count_nonzero(valid) < 2:
             continue
 
@@ -1047,7 +1505,7 @@ def _formation_error_figure(data: dict[str, object], paper_quality: bool):
         axis.plot(
             times[valid],
             error_norm,
-            label=f"{robots[observer]}->{robots[target]}",
+            label=rf"$\|\tilde{{\boldsymbol{{p}}}}_{{{observer + 1}{target + 1}}}\|$",
         )
         plotted = True
 
@@ -1056,13 +1514,20 @@ def _formation_error_figure(data: dict[str, object], paper_quality: bool):
         return None
 
     axis.set_xlabel(r"$t$ [s]")
-    axis.set_ylabel(r"$\|e_{ij}^{\mathrm{form}}\|$ [m]")
+    axis.set_ylabel(r"$\|\tilde{\boldsymbol{p}}_{ij}\|$ [m]")
     axis.set_title("Formation error")
     axis.grid(True, alpha=0.3)
-    if len(tuple(graph.edges)) > 1:
-        axis.legend()
+    if show_legends and len(tuple(graph.edges)) > 1:
+        axis.legend(
+            loc="lower center",
+            bbox_to_anchor=(0.5, 1.02),
+            ncol=min(4, len(tuple(graph.edges))),
+            frameon=False,
+        )
     figure.tight_layout()
     return figure
+
+
 
 
 def _thruster_force_figures(
@@ -1238,12 +1703,15 @@ def _formation_tracking_figures(
             axis.grid(True, alpha=0.3)
 
         axes[0].set_title(
-            "Formation tracking: " f"{robots[observer]}->{robots[target]}"
+            "Formation tracking: "
+            f"{robots[observer]}->{robots[target]}"
         )
         axes[0].legend()
         axes[-1].set_xlabel(r"$t$ [s]")
         figure.tight_layout()
-        figures[f"formation_tracking_{robots[observer]}_to_{robots[target]}"] = figure
+        figures[
+            f"formation_tracking_{robots[observer]}_to_{robots[target]}"
+        ] = figure
 
     return figures
 
@@ -1507,7 +1975,9 @@ def _print_summary(data: dict[str, object]) -> None:
     print(f"Robots: {', '.join(robots)}")
     print(
         "Edges: "
-        + ", ".join(f"{robots[edge.observer]}->{robots[edge.target]}" for edge in graph)
+        + ", ".join(
+            f"{robots[edge.observer]}->{robots[edge.target]}" for edge in graph
+        )
     )
 
     if followers:
@@ -1598,7 +2068,9 @@ def _print_summary(data: dict[str, object]) -> None:
             dtype=float,
         )
         for agent, robot in enumerate(robots):
-            finite_s = workspace_s[:, agent][np.isfinite(workspace_s[:, agent])]
+            finite_s = workspace_s[:, agent][
+                np.isfinite(workspace_s[:, agent])
+            ]
             finite_margin = workspace_margin[:, agent][
                 np.isfinite(workspace_margin[:, agent])
             ]
@@ -1616,9 +2088,13 @@ def _print_summary(data: dict[str, object]) -> None:
             if finite_margin.size or finite_s.size:
                 pieces = [f"Workspace {robot}:"]
                 if finite_margin.size:
-                    pieces.append(f"min physical margin {np.min(finite_margin):.4f} m")
+                    pieces.append(
+                        f"min physical margin {np.min(finite_margin):.4f} m"
+                    )
                 if finite_s.size:
-                    pieces.append(f"max relaxation {np.max(finite_s):.3f}")
+                    pieces.append(
+                        f"max relaxation {np.max(finite_s):.3f}"
+                    )
                 pieces.append(f"closest wall {closest_name}")
                 print(", ".join(pieces))
 
@@ -1641,7 +2117,10 @@ def _print_summary(data: dict[str, object]) -> None:
         )
     if np.any(valid_v):
         error = np.linalg.norm(v[valid_v] - v_ref[valid_v], axis=1)
-        print("Leader velocity tracking: " f"RMS {np.sqrt(np.mean(error**2)):.4f} m/s")
+        print(
+            "Leader velocity tracking: "
+            f"RMS {np.sqrt(np.mean(error**2)):.4f} m/s"
+        )
 
 
 def _save_figures(
@@ -1686,9 +2165,7 @@ def main() -> None:
     parser.add_argument("--paper", action="store_true", help="paper-oriented preset")
     parser.add_argument("--all", action="store_true", help="all available diagnostics")
     parser.add_argument("--trajectory", action="store_true")
-    parser.add_argument(
-        "--leader-tracking", dest="leader_tracking", action="store_true"
-    )
+    parser.add_argument("--leader-tracking", dest="leader_tracking", action="store_true")
     parser.add_argument(
         "--leader-position",
         dest="leader_position",
@@ -1734,9 +2211,25 @@ def main() -> None:
     parser.add_argument("--peak-debug", dest="peak_debug", action="store_true")
     parser.add_argument("--paper-quality", action="store_true")
     parser.add_argument(
+        "--show-legends",
+        action="store_true",
+        help=(
+            "show legends on formation-error and sensing-constraint plots/"
+            "animations; hidden by default for compact paper/video output"
+        ),
+    )
+    parser.add_argument(
         "--animation",
         action="store_true",
         help="create a 3-D formation animation with faint desired vehicles",
+    )
+    parser.add_argument(
+        "--diagnostic-animations",
+        action="store_true",
+        help=(
+            "animate formation error and distance/horizontal-FoV/vertical-FoV "
+            "diagnostic plots"
+        ),
     )
     parser.add_argument(
         "--animation-format",
@@ -1860,6 +2353,7 @@ def main() -> None:
         figures["formation_error"] = _formation_error_figure(
             data,
             args.paper_quality,
+            args.show_legends,
         )
         if figures["formation_error"] is None:
             print(
@@ -1871,12 +2365,14 @@ def main() -> None:
         figures["distance"] = _distance_diagnostics_figure(
             data,
             args.paper_quality,
+            args.show_legends,
         )
 
     if "fov" in selected:
         horizontal, vertical = _fov_diagnostics_figures(
             data,
             args.paper_quality,
+            args.show_legends,
         )
         figures["fov_horizontal"] = horizontal
         figures["fov_vertical"] = vertical
@@ -1975,12 +2471,10 @@ def main() -> None:
         )
 
     if "backstepping" in selected:
-        figures["velocity_backstepping_split"] = (
-            legacy.plot_velocity_backstepping_split(
-                scenario,
-                trajectory,
-                clf,
-            )
+        figures["velocity_backstepping_split"] = legacy.plot_velocity_backstepping_split(
+            scenario,
+            trajectory,
+            clf,
         )
 
     if "peak_debug" in selected:
@@ -2021,6 +2515,32 @@ def main() -> None:
             azimuth=args.animation_azimuth,
         )
 
+    diagnostic_animations: dict[str, tuple[plt.Figure, FuncAnimation]] = {}
+    if args.diagnostic_animations:
+        diagnostic_animations["formation_error"] = _formation_error_animation(
+            data,
+            paper_quality=args.paper_quality,
+            frame_stride=args.frame_stride,
+            show_legends=args.show_legends,
+        )
+        diagnostic_animations["distance"] = _distance_diagnostics_animation(
+            data,
+            paper_quality=args.paper_quality,
+            frame_stride=args.frame_stride,
+            show_legends=args.show_legends,
+        )
+        diagnostic_animations.update(
+            _fov_diagnostics_animations(
+                data,
+                paper_quality=args.paper_quality,
+                frame_stride=args.frame_stride,
+                show_legends=args.show_legends,
+            )
+        )
+
+        control_times = np.asarray(data["arrays"]["times"], dtype=float)
+        animation_dt = float(np.median(np.diff(control_times)))
+
     if args.save:
         output_dir = args.output_dir or args.history.parent / "plots"
         _save_figures(
@@ -2047,6 +2567,21 @@ def main() -> None:
                 f"at {fps:.3f} fps"
             )
 
+        if diagnostic_animations:
+            assert animation_dt is not None
+            fps = args.animation_fps
+            if fps is None:
+                fps = 1.0 / (animation_dt * args.frame_stride)
+            for name, (_, animation) in diagnostic_animations.items():
+                path = output_dir / f"{name}_animation.{args.animation_format}"
+                save_animation(
+                    animation,
+                    path,
+                    paper_quality=args.paper_quality,
+                    fps=fps,
+                )
+                print(f"Saved {name} animation to {path} at {fps:.3f} fps")
+
     if args.show:
         plt.show()
     else:
@@ -2055,6 +2590,8 @@ def main() -> None:
                 plt.close(figure)
         if formation_animation is not None:
             plt.close(formation_animation.figure)
+        for figure, _ in diagnostic_animations.values():
+            plt.close(figure)
 
 
 if __name__ == "__main__":
