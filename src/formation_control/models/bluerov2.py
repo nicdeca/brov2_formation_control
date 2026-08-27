@@ -1,4 +1,4 @@
-"""Six-degree-of-freedom BlueROV2 Heavy dynamics with body-wrench input."""
+"""Six-degree-of-freedom BlueROV2 dynamics with selectable configurations."""
 
 from __future__ import annotations
 
@@ -19,48 +19,61 @@ from .base import ContinuousTimeModel, FloatArray
 
 @dataclass(frozen=True, slots=True)
 class BlueROV2Parameters:
-    """Physical and hydrodynamic parameters of the BlueROV2 Heavy model.
+    """Physical and hydrodynamic parameters of one BlueROV2 configuration.
 
-    The defaults reproduce the parameters used by the previous codebase, but
-    are stored with positive added-mass and damping magnitudes for clarity.
+    The dataclass defaults correspond to the ``gazebo`` configuration.  The
+    simulation and two characterized lab configurations can be selected
+    explicitly with :meth:`gazebo`, :meth:`standard`, :meth:`heavy_tube`, or
+    :meth:`from_configuration`.
+
+    The ``heavy_tube`` values intentionally reproduce the executable values in
+    the reference real-robot model.  In particular, its current executable
+    model uses ``mass = 16.4 kg`` and ``volume = 0.0134 m^3``.
     """
 
     water_density: float = 1000.0
-    gravity: float = 9.82
-    mass: float = 13.5
-    volume: float = 0.0134
+    gravity: float = 9.8
 
-    inertia_x: float = 0.26
-    inertia_y: float = 0.23
-    inertia_z: float = 0.37
+    # Default: "gazebo".  The SDF has a 13.0 kg base link and eight 0.05 kg
+    # thruster links.  This reduced six-DoF model folds them into one rigid body
+    # while taking hydrodynamic coefficients directly from the SDF plugin.
+    mass: float = 13.4
+    volume: float = 0.0135
+
+    inertia_x: float = 0.2631892537313433
+    inertia_y: float = 0.2293092537313433
+    inertia_z: float = 0.37528
 
     cg_x: float = 0.0
     cg_y: float = 0.0
     cg_z: float = 0.0
     cb_x: float = 0.0
     cb_y: float = 0.0
-    cb_z: float = -0.01
+    # The assembled center of gravity is 0.0008955 m below the base-link
+    # origin, while the SDF collision center is z=+0.02 m in FLU.  The
+    # restoring equations retain Fossen's z-down hydrostatic convention.
+    cb_z: float = -0.0208955223880597
 
-    added_mass_u: float = 6.36
-    added_mass_v: float = 7.12
-    added_mass_w: float = 18.68
-    added_mass_p: float = 0.189
-    added_mass_q: float = 0.135
-    added_mass_r: float = 0.222
+    added_mass_u: float = 1.272
+    added_mass_v: float = 1.424
+    added_mass_w: float = 3.736
+    added_mass_p: float = 0.0378
+    added_mass_q: float = 0.027
+    added_mass_r: float = 0.0444
 
     linear_damping_u: float = 13.7
-    linear_damping_v: float = 0.0
-    linear_damping_w: float = 33.0
-    linear_damping_p: float = 0.0
+    linear_damping_v: float = 1.0
+    linear_damping_w: float = 23.0
+    linear_damping_p: float = 0.5
     linear_damping_q: float = 0.8
-    linear_damping_r: float = 0.0
+    linear_damping_r: float = 0.1
 
-    quadratic_damping_u: float = 141.0
-    quadratic_damping_v: float = 217.0
-    quadratic_damping_w: float = 190.0
-    quadratic_damping_p: float = 1.19
-    quadratic_damping_q: float = 0.47
-    quadratic_damping_r: float = 1.5
+    quadratic_damping_u: float = 14.1
+    quadratic_damping_v: float = 21.7
+    quadratic_damping_w: float = 19.0
+    quadratic_damping_p: float = 0.119
+    quadratic_damping_q: float = 0.047
+    quadratic_damping_r: float = 0.15
 
     def __post_init__(self) -> None:
         positive = {
@@ -83,6 +96,86 @@ class BlueROV2Parameters:
         )
         if any(np.any(values < 0.0) for values in nonnegative):
             raise ValueError("added-mass and damping magnitudes must be nonnegative.")
+
+    @classmethod
+    def gazebo(cls) -> BlueROV2Parameters:
+        """Return the active Gazebo/SITL SDF parameter set."""
+        return cls()
+
+    @classmethod
+    def standard(cls) -> BlueROV2Parameters:
+        """Return the characterized standard lab-robot parameter set."""
+        mass = 12.5
+        mass_scale = mass / 13.0
+        return cls(
+            gravity=9.82,
+            mass=mass,
+            volume=0.0135,
+            inertia_x=0.25 * mass_scale,
+            inertia_y=0.221 * mass_scale,
+            inertia_z=0.356 * mass_scale,
+            cb_z=-0.01,
+            added_mass_r=0.044,
+            linear_damping_v=0.0,
+            linear_damping_w=33.0,
+            linear_damping_p=0.0,
+            linear_damping_r=0.0,
+            quadratic_damping_u=141.0,
+            quadratic_damping_v=217.0,
+            quadratic_damping_w=190.0,
+            quadratic_damping_p=1.19,
+            quadratic_damping_q=0.47,
+            quadratic_damping_r=1.5,
+        )
+
+    @classmethod
+    def heavy_tube(cls) -> BlueROV2Parameters:
+        """Return the lab configuration with the additional upper tube."""
+        mass = 16.4
+        mass_scale = mass / 13.0
+        return cls(
+            gravity=9.82,
+            mass=mass,
+            volume=0.0134,
+            inertia_x=0.25 * mass_scale,
+            inertia_y=0.221 * mass_scale,
+            inertia_z=0.356 * mass_scale,
+            added_mass_u=6.36,
+            added_mass_v=7.12,
+            added_mass_w=18.68,
+            added_mass_p=0.189,
+            added_mass_q=0.135,
+            added_mass_r=0.222,
+            cb_z=-0.01,
+            linear_damping_v=0.0,
+            linear_damping_w=33.0,
+            linear_damping_p=0.0,
+            linear_damping_r=0.0,
+            quadratic_damping_u=141.0,
+            quadratic_damping_v=217.0,
+            quadratic_damping_w=190.0,
+            quadratic_damping_p=1.19,
+            quadratic_damping_q=0.47,
+            quadratic_damping_r=1.5,
+        )
+
+    @classmethod
+    def from_configuration(
+        cls,
+        configuration: str,
+    ) -> BlueROV2Parameters:
+        """Build one of the supported named robot configurations."""
+        name = str(configuration).strip().lower()
+        if name == "gazebo":
+            return cls.gazebo()
+        if name == "standard":
+            return cls.standard()
+        if name == "heavy_tube":
+            return cls.heavy_tube()
+        raise ValueError(
+            f"Unknown BlueROV2 configuration {configuration!r}. "
+            "Expected 'gazebo', 'standard', or 'heavy_tube'."
+        )
 
     @property
     def center_of_gravity(self) -> FloatArray:
@@ -169,7 +262,7 @@ class BlueROV2Model(ContinuousTimeModel):
         *,
         current_velocity_inertial: FloatArray | None = None,
     ) -> None:
-        self.parameters = parameters or BlueROV2Parameters()
+        self.parameters = parameters or BlueROV2Parameters.gazebo()
         if current_velocity_inertial is None:
             current_velocity_inertial = np.zeros(3)
         self._current_velocity_inertial = np.asarray(

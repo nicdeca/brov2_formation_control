@@ -1,26 +1,34 @@
 """Generic soft CLF quadratic program.
 
-For a control-affine CLF derivative
+For an affine scalar dissipation condition
 
-    W_dot = a + b.T u,
+    a_c + b.T u <= -d + delta,
 
 the optimization problem is
 
-    minimize    1/2 u.T H u + p_1 delta + 1/2 p_2 delta^2
+    minimize    1/2 (u-u_ref).T H (u-u_ref)
+                + p_1 delta + 1/2 p_2 delta^2
 
-    subject to  a + b.T u <= -alpha(W) + delta,
+    subject to  a_c + b.T u <= -d + delta,
                 delta >= 0,
                 u in U.
 
+The default generic behavior remains the conventional CLF condition
+``a + b.T u <= -alpha(W) + delta``.  The command-filtered second-order
+controller supplies the paper-specific pair ``(a_c, d)`` explicitly, with
+
+    a_c = e_nu.T (zeta - h - M nu_c_dot),
+    d   = e_nu.T K_e e_nu.
+
+This keeps the QP layer model-independent while implementing the updated
+backstepping inequality exactly.
+
 ``slack_linear_penalty`` is ``p_1`` and ``slack_penalty`` is the quadratic
-coefficient ``p_2``.  A positive ``p_1`` makes zero slack an exact optimum
-over a nontrivial range of CLF multipliers, rather than giving slack zero
-marginal cost at the origin.
+coefficient ``p_2``.
 
 For the online BlueROV2 controller, ``U`` is a thruster-force box and ``H`` is
-diagonal.  That special case admits a small, deterministic, numerically robust
-solver based on the scalar KKT multiplier of the CLF constraint.  General
-polyhedral cases continue to use the configured external QP solver.
+diagonal.  That special case admits a deterministic scalar-KKT solver.
+General polyhedral cases continue to use the configured external QP solver.
 """
 
 from __future__ import annotations
@@ -224,21 +232,69 @@ class CLFQP:
         """Whether this QP has the structure required by the direct solver."""
         return self.control_set.inequality_matrix is None and _is_diagonal(self.control_weight)
 
+    def _constraint_terms(
+        self,
+        clf: BacksteppingCLFEvaluation,
+        *,
+        constraint_drift: float | None,
+        dissipation_rate: float | None,
+    ) -> tuple[float, float]:
+        """Return ``(a_c, d)`` for ``a_c + b.T u <= -d + delta``.
+
+        If no explicit terms are supplied, retain the generic legacy CLF
+        condition with ``a_c = clf.drift`` and ``d = alpha(W)``.
+        """
+        if (constraint_drift is None) != (dissipation_rate is None):
+            raise ValueError(
+                "constraint_drift and dissipation_rate must be supplied together."
+            )
+
+        if constraint_drift is None:
+            drift = float(clf.drift)
+        else:
+            drift = float(constraint_drift)
+            if not np.isfinite(drift):
+                raise ValueError("constraint_drift must be finite.")
+
+        if dissipation_rate is None:
+            decay = float(self.alpha(clf.value))
+            if not np.isfinite(decay) or decay < 0.0:
+                raise ValueError(
+                    "alpha must return a finite nonnegative value for W >= 0."
+                )
+        else:
+            decay = float(dissipation_rate)
+            if not np.isfinite(decay) or decay < 0.0:
+                raise ValueError("dissipation_rate must be finite and nonnegative.")
+
+        return drift, decay
+
     def build_problem(
         self,
         clf: BacksteppingCLFEvaluation,
         *,
         control_reference: FloatArray | None = None,
+        constraint_drift: float | None = None,
+        dissipation_rate: float | None = None,
         lower_override: FloatArray | None = None,
         upper_override: FloatArray | None = None,
     ) -> CLFQPProblem:
-        """Assemble the numerical QP matrices."""
+        """Assemble the numerical QP matrices.
+
+        ``constraint_drift`` and ``dissipation_rate`` define
+
+            constraint_drift + b.T u <= -dissipation_rate + delta.
+
+        Omitting both recovers the generic ``-alpha(W)`` CLF formulation.
+        """
         if clf.control_gradient.shape != (self.control_dim,):
             raise ValueError("CLF control-gradient dimension does not match the QP.")
 
-        decay = float(self.alpha(clf.value))
-        if not np.isfinite(decay) or decay < 0.0:
-            raise ValueError("alpha must return a finite nonnegative value for W >= 0.")
+        drift, decay = self._constraint_terms(
+            clf,
+            constraint_drift=constraint_drift,
+            dissipation_rate=dissipation_rate,
+        )
 
         decision_dim = self.control_dim + 1
         slack_index = self.control_dim
@@ -246,16 +302,16 @@ class CLFQP:
         quadratic_cost = np.zeros((decision_dim, decision_dim))
         quadratic_cost[: self.control_dim, : self.control_dim] = self.control_weight
         quadratic_cost[slack_index, slack_index] = self.slack_penalty
+
         reference = self._control_reference(control_reference)
         linear_cost = np.zeros(decision_dim)
         linear_cost[: self.control_dim] = -(self.control_weight @ reference)
         linear_cost[slack_index] = self.slack_linear_penalty
 
-        # CLF condition:
-        # b.T u - delta <= -alpha(W) - a.
+        # b.T u - delta <= -d - a_c.
         clf_row = np.concatenate((clf.control_gradient, np.array([-1.0])))
         inequality_rows = [clf_row]
-        inequality_bounds = [-decay - clf.drift]
+        inequality_bounds = [-decay - drift]
 
         if self.control_set.inequality_matrix is not None:
             assert self.control_set.inequality_bound is not None
@@ -294,6 +350,8 @@ class CLFQP:
         self,
         clf: BacksteppingCLFEvaluation,
         *,
+        constraint_drift: float | None = None,
+        dissipation_rate: float | None = None,
         lower_override: FloatArray | None = None,
         upper_override: FloatArray | None = None,
     ) -> CLFActuationFeasibility | None:
@@ -313,25 +371,65 @@ class CLFQP:
             if self.feasibility_control_dim is None
             else self.feasibility_control_dim
         )
-        feasibility_clf = clf
-        if feasibility_dim != self.control_dim:
-            feasibility_clf = BacksteppingCLFEvaluation(
-                value=clf.value,
-                configuration_value=clf.configuration_value,
-                velocity_error_value=clf.velocity_error_value,
-                velocity_error=clf.velocity_error,
-                drift=clf.drift,
-                control_gradient=clf.control_gradient[:feasibility_dim],
+
+        # Preserve the existing helper for callers using the conventional
+        # ``-alpha(W)`` formulation.
+        if constraint_drift is None and dissipation_rate is None:
+            feasibility_clf = clf
+            if feasibility_dim != self.control_dim:
+                feasibility_clf = BacksteppingCLFEvaluation(
+                    value=clf.value,
+                    configuration_value=clf.configuration_value,
+                    velocity_error_value=clf.velocity_error_value,
+                    velocity_error=clf.velocity_error,
+                    drift=clf.drift,
+                    control_gradient=clf.control_gradient[:feasibility_dim],
+                )
+
+            return box_clf_actuation_feasibility(
+                feasibility_clf,
+                alpha=self.alpha,
+                control_set=PolyhedralControlSet(
+                    dimension=feasibility_dim,
+                    lower=lower[:feasibility_dim],
+                    upper=upper[:feasibility_dim],
+                ),
             )
 
-        return box_clf_actuation_feasibility(
-            feasibility_clf,
-            alpha=self.alpha,
-            control_set=PolyhedralControlSet(
-                dimension=feasibility_dim,
-                lower=lower[:feasibility_dim],
-                upper=upper[:feasibility_dim],
-            ),
+        drift, decay = self._constraint_terms(
+            clf,
+            constraint_drift=constraint_drift,
+            dissipation_rate=dissipation_rate,
+        )
+        gradient = np.asarray(clf.control_gradient[:feasibility_dim], dtype=float)
+        lower_f = lower[:feasibility_dim]
+        upper_f = upper[:feasibility_dim]
+
+        midpoint = 0.5 * (lower_f + upper_f)
+        minimizing_control = midpoint.copy()
+        minimizing_control[gradient > 0.0] = lower_f[gradient > 0.0]
+        minimizing_control[gradient < 0.0] = upper_f[gradient < 0.0]
+
+        minimum_constraint_lhs = drift + float(gradient @ minimizing_control)
+        constraint_margin = -decay - minimum_constraint_lhs
+        required_slack = max(-constraint_margin, 0.0)
+
+        # Keep the diagnostic fields in full-CLF coordinates.  The offset
+        # ``clf.drift - drift`` cancels exactly from the feasibility margin.
+        full_gradient = np.asarray(clf.control_gradient, dtype=float)
+        full_control = np.zeros(self.control_dim)
+        full_control[:feasibility_dim] = minimizing_control
+        minimum_modeled_derivative = float(
+            clf.drift + full_gradient @ full_control
+        )
+        zero_slack_upper_bound = float(clf.drift - drift - decay)
+
+        return CLFActuationFeasibility(
+            minimizing_control=minimizing_control,
+            minimum_modeled_derivative=minimum_modeled_derivative,
+            zero_slack_upper_bound=zero_slack_upper_bound,
+            margin=float(constraint_margin),
+            required_slack=float(required_slack),
         )
 
     def _control_reference(
@@ -397,6 +495,8 @@ class CLFQP:
         clf: BacksteppingCLFEvaluation,
         *,
         control_reference: FloatArray | None = None,
+        constraint_drift: float | None = None,
+        dissipation_rate: float | None = None,
         lower_override: FloatArray | None = None,
         upper_override: FloatArray | None = None,
     ) -> tuple[FloatArray, float]:
@@ -405,14 +505,14 @@ class CLFQP:
         With diagonal ``H`` and no general linear input constraints, stationarity
         gives
 
-            u_k(lambda) = clip(-lambda b_k / H_kk, l_k, u_k),
+            u_k(lambda) = clip(u_ref,k - lambda b_k / H_kk, l_k, u_k),
             delta(lambda)
               = max(0, (lambda - p_1) / p_2).
 
         If the CLF constraint is active, the unique multiplier is the root of
 
             phi(lambda)
-              = a + alpha(W)
+              = a_c + d
                 + b.T u(lambda)
                 - max(0, (lambda - p_1) / p_2).
 
@@ -433,10 +533,16 @@ class CLFQP:
         if not np.all(np.isfinite(gradient)):
             raise CLFQPSolverError("CLF control gradient is non-finite before solving.")
 
-        decay = float(self.alpha(clf.value))
-        constant = float(clf.drift) + decay
+        drift, decay = self._constraint_terms(
+            clf,
+            constraint_drift=constraint_drift,
+            dissipation_rate=dissipation_rate,
+        )
+        constant = drift + decay
         if not np.isfinite(constant):
-            raise CLFQPSolverError("CLF drift plus decay term is non-finite before solving.")
+            raise CLFQPSolverError(
+                "CLF constraint drift plus dissipation term is non-finite before solving."
+            )
 
         diagonal = np.diag(self.control_weight)
         reference = self._control_reference(control_reference)
@@ -559,21 +665,35 @@ class CLFQP:
         clf: BacksteppingCLFEvaluation,
         *,
         control_reference: FloatArray | None = None,
+        constraint_drift: float | None = None,
+        dissipation_rate: float | None = None,
         lower_override: FloatArray | None = None,
         upper_override: FloatArray | None = None,
     ) -> CLFQPResult:
-        """Solve the CLF-QP and return control, slack, and diagnostics.
+        """Solve the soft affine-dissipation QP.
 
         ``control_reference`` changes the control objective to
 
             1/2 (u - u_ref).T H (u - u_ref).
 
-        Optional bound overrides are intersected with the controller's static
-        control box and are useful for state-dependent auxiliary-input bounds.
+        The optional pair ``(constraint_drift, dissipation_rate)`` replaces the
+        generic CLF constraint with
+
+            constraint_drift + b.T u
+                <= -dissipation_rate + delta.
+
+        Optional bound overrides are intersected with the static control box.
         """
         reference = self._control_reference(control_reference)
+        drift, decay = self._constraint_terms(
+            clf,
+            constraint_drift=constraint_drift,
+            dissipation_rate=dissipation_rate,
+        )
         actuation_feasibility = self.actuation_feasibility(
             clf,
+            constraint_drift=constraint_drift,
+            dissipation_rate=dissipation_rate,
             lower_override=lower_override,
             upper_override=upper_override,
         )
@@ -582,6 +702,8 @@ class CLFQP:
             control, slack = self._direct_box_diagonal_solution(
                 clf,
                 control_reference=reference,
+                constraint_drift=constraint_drift,
+                dissipation_rate=dissipation_rate,
                 lower_override=lower_override,
                 upper_override=upper_override,
             )
@@ -589,13 +711,21 @@ class CLFQP:
             problem = self.build_problem(
                 clf,
                 control_reference=reference,
+                constraint_drift=constraint_drift,
+                dissipation_rate=dissipation_rate,
                 lower_override=lower_override,
                 upper_override=upper_override,
             )
             control, slack = self._external_solution(problem)
 
+        # Report the equivalent bound in full modeled-Wdot coordinates:
+        #
+        #   Wdot = clf.drift + b.T u
+        #        <= (clf.drift - a_c) - d + delta.
+        #
+        # Its residual is exactly the optimized scalar inequality residual.
         modeled_derivative = clf.derivative(control)
-        desired_upper_bound = -float(self.alpha(clf.value)) + slack
+        desired_upper_bound = float(clf.drift - drift - decay + slack)
         residual = modeled_derivative - desired_upper_bound
 
         residual_scale = max(
@@ -605,15 +735,8 @@ class CLFQP:
         )
 
         if self.uses_direct_box_solver:
-            # The direct KKT/bisection solver deliberately returns the
-            # feasible side of the final scalar bracket, so only floating-point
-            # roundoff should remain.
             residual_tolerance = 1e-8 * residual_scale
         elif self.solver == "osqp":
-            # A generic first-order QP solver is only expected to satisfy the
-            # inequalities to its configured primal feasibility tolerance.
-            # Do not reject a valid OSQP solution with a stricter post-check
-            # than the solver itself was asked to enforce.
             eps_abs = float(self.solver_options.get("eps_abs", 1e-7))
             eps_rel = float(self.solver_options.get("eps_rel", 1e-7))
             residual_tolerance = 10.0 * (eps_abs + eps_rel * residual_scale)
@@ -622,8 +745,8 @@ class CLFQP:
 
         if residual > residual_tolerance:
             raise CLFQPSolverError(
-                "CLF-QP solution violates its CLF inequality beyond "
-                "the numerical tolerance associated with the selected "
+                "CLF-QP solution violates its affine dissipation inequality "
+                "beyond the numerical tolerance associated with the selected "
                 f"solver (residual={residual:.3e}, "
                 f"tolerance={residual_tolerance:.3e})."
             )
@@ -644,3 +767,4 @@ class CLFQP:
             clf_residual=residual,
             actuation_feasibility=actuation_feasibility,
         )
+

@@ -263,3 +263,36 @@ functions from example 04 into
 `src/formation_control/visualization/bluerov2_diagnostics.py`. Then both the
 simulation example and ROS experiment plotter can import that module directly;
 the snapshot and NPZ formats do not need to change.
+
+
+## Current paper and animation commands
+
+Paper figures:
+
+```bash
+uv run python scripts/plot_formation_experiment.py \
+  "$RUN/formation_history.npz" \
+  --paper \
+  --paper-quality \
+  --save \
+  --format pdf
+```
+
+The distance and horizontal/vertical FoV paper plots use one color per sensing
+edge. Measured quantities are solid, adaptive bounds for the same edge are
+dashed, and physical/conservative limits use distinct line styles.
+
+Formation animation:
+
+```bash
+uv run python scripts/plot_formation_experiment.py \
+  "$RUN/formation_history.npz" \
+  --animation \
+  --save \
+  --animation-format mp4 \
+  --frame-stride 2
+```
+
+The animation reconstructs the time-varying desired absolute positions along
+the directed tree and renders them as subdued dashed/wireframe reference
+vehicles alongside the measured formation.

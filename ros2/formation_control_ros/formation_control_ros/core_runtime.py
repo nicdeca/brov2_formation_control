@@ -29,7 +29,7 @@ from formation_control.constraints import (
     MinimumDistanceConstraint,
     NormalizedImagePoint,
     VerticalFieldOfViewConstraint,
-    evaluate_sensing_constraint_kinematics,
+    evaluate_sensing_constraint_values,
 )
 from formation_control.control import (
     BlueROV2ControlSpace,
@@ -48,7 +48,7 @@ from formation_control.geometry import (
     PinholeCamera,
     rotation_matrix_from_quaternion,
 )
-from formation_control.models import BlueROV2Model
+from formation_control.models import BlueROV2Model, BlueROV2Parameters
 from formation_control.potentials import (
     AdaptiveConstraintBarrierPotential,
     ConstraintBarrierPotential,
@@ -69,6 +69,7 @@ class CoreControllerConfig:
     """Core tuning shared by leader and follower ROS nodes."""
 
     control_space: BlueROV2ControlSpace = "thruster"
+    robot_configuration: str = "gazebo"
     thruster_voltage: int = 16
     thrust_derating: float = 1.0
     virtual_linear_speed_limit: float = 1.5
@@ -119,7 +120,10 @@ class FollowerTaskConfig:
     vertical_fov_barrier_weight: float = 0.25
     adaptive: bool = True
     relaxation_recovery_gain: float = 0.8
-    relaxation_domain_margin_ratio: float = 0.1
+    relaxation_barrier_gain: float = 0.20
+    relaxation_domain_margin_ratio: float = 0.10
+    relaxation_activation_on_ratio: float = 0.10
+    relaxation_activation_off_ratio: float = 0.30
     use_parent_velocity_in_clf: bool = False
 
 
@@ -306,7 +310,11 @@ class FollowerCoreRuntime:
         self.workspace_config = workspace_config
         self._workspace = _WorkspaceRuntime(workspace_config)
 
-        self.model = BlueROV2Model()
+        self.model = BlueROV2Model(
+            BlueROV2Parameters.from_configuration(
+                controller_config.robot_configuration
+            )
+        )
         self.allocation = BlueROV2HeavyThrusterAllocation.default_45deg(
             voltage=controller_config.thruster_voltage,
             derating=controller_config.thrust_derating,
@@ -411,7 +419,10 @@ class FollowerCoreRuntime:
                 dtype=float,
             ),
             recovery_gain=task_config.relaxation_recovery_gain,
+            barrier_gain=task_config.relaxation_barrier_gain,
             domain_margin_ratio=task_config.relaxation_domain_margin_ratio,
+            activation_on_ratio=task_config.relaxation_activation_on_ratio,
+            activation_off_ratio=task_config.relaxation_activation_off_ratio,
             minimum_constraint_margin=1e-5,
         )
         self._enabled_relaxation = np.ones(4, dtype=bool)
@@ -560,17 +571,16 @@ class FollowerCoreRuntime:
         parent_state: np.ndarray,
     ) -> None:
         if self.task_config.adaptive:
-            kinematics = evaluate_sensing_constraint_kinematics(
-                self.model,
+            sensing_values = evaluate_sensing_constraint_values(
                 self.camera,
                 self.distance_domain,
                 self.fov_domain,
                 follower_state,
-                parent_state,
+                parent_state[:3],
             )
             projected, _ = self.relaxation.project_to_current_domain(
                 self._relaxation_state,
-                kinematics.values,
+                sensing_values.values,
                 enabled=self._enabled_relaxation,
             )
             self._relaxation_state = projected
@@ -616,19 +626,18 @@ class FollowerCoreRuntime:
         # but exclude diagnostic packing and state integration.
         start_time = perf_counter()
 
-        kinematics = evaluate_sensing_constraint_kinematics(
-            self.model,
+        sensing_values = evaluate_sensing_constraint_values(
             self.camera,
             self.distance_domain,
             self.fov_domain,
             follower_state,
-            parent_state,
+            parent_state[:3],
         )
 
         if self.task_config.adaptive:
             projected, _ = self.relaxation.project_to_current_domain(
                 self._relaxation_state,
-                kinematics.values,
+                sensing_values.values,
                 enabled=self._enabled_relaxation,
             )
             self._relaxation_state = projected
@@ -685,10 +694,8 @@ class FollowerCoreRuntime:
         if self.task_config.adaptive:
             relaxation_evaluation = self.relaxation.evaluate(
                 relaxation_state,
-                conservative_values=kinematics.values,
-                conservative_rates=kinematics.rates,
+                conservative_values=sensing_values.values,
                 enabled=self._enabled_relaxation,
-                sample_time=dt,
             )
             relaxation_rate = np.asarray(
                 relaxation_evaluation.selected_rate,
@@ -711,7 +718,7 @@ class FollowerCoreRuntime:
                 parent_velocity_inertial=parent_velocity_for_snapshot,
                 desired_relative_position=self._desired_relative_position,
                 evaluation=evaluation,
-                conservative_values=kinematics.values,
+                conservative_values=sensing_values.values,
                 relaxation_state=relaxation_state,
                 relaxation_rate=relaxation_rate,
                 controller_time_s=controller_time_s,
@@ -729,10 +736,12 @@ class FollowerCoreRuntime:
         # assembled, so snapshot[s] and snapshot[s_dot] correspond to x_k and
         # the control input generated at the same timer tick.
         if self.task_config.adaptive:
-            self._relaxation_state = np.clip(
+            # Forward-Euler integration of the continuous-time auxiliary
+            # dynamics. Only tiny numerical undershoots below zero are
+            # removed; there is intentionally no upper clipping at s = 1.
+            self._relaxation_state = np.maximum(
                 relaxation_state + dt * relaxation_rate,
                 0.0,
-                1.0,
             )
 
         self._workspace.state = workspace_relaxation_state
@@ -766,7 +775,7 @@ class FollowerCoreRuntime:
                 thruster_utilization=utilization,
                 relaxation_state=relaxation_state,
                 conservative_constraint_values=np.asarray(
-                    kinematics.values,
+                    sensing_values.values,
                     dtype=float,
                 ).copy(),
                 minimum_physical_margin=physical_margin,
@@ -793,7 +802,11 @@ class LeaderCoreRuntime:
     ) -> None:
         self.workspace_config = workspace_config
         self._workspace = _WorkspaceRuntime(workspace_config)
-        self.model = BlueROV2Model()
+        self.model = BlueROV2Model(
+            BlueROV2Parameters.from_configuration(
+                controller_config.robot_configuration
+            )
+        )
         self.allocation = BlueROV2HeavyThrusterAllocation.default_45deg(
             voltage=controller_config.thruster_voltage,
             derating=controller_config.thrust_derating,
@@ -986,4 +999,3 @@ class LeaderCoreRuntime:
             ),
             snapshot=snapshot,
         )
-

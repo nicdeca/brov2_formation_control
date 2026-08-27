@@ -9,7 +9,7 @@ The project combines:
 - recentered logarithmic barrier potentials;
 - command-filtered backstepping;
 - smooth norm saturation of the virtual twist;
-- actuator-constrained CLF-QP control directly in thruster space;
+- actuator-constrained CLF-QP control in thruster or body-wrench space;
 - adaptive enlargement of conservative sensing domains toward the physical limits;
 - long-horizon multi-robot validation with moving leaders;
 - simulation-only robustness tests with uncertainty, current, noise, and delay.
@@ -53,7 +53,7 @@ backstepping CLF
 actuator-constrained CLF-QP
         |
         v
-BlueROV2 Heavy thruster forces
+BlueROV2 Heavy thruster forces or body wrench
 ```
 
 The leader differs only in the upper-level objective. It can track either:
@@ -79,6 +79,17 @@ w = B f
 ```
 
 and physical thruster bounds enforced directly by the CLF-QP.
+
+Three dynamics presets are available:
+
+- `gazebo`: parameters matching the current PX4/Gazebo SITL model;
+- `standard`: characterized standard laboratory BlueROV2 configuration;
+- `heavy_tube`: characterized heavy-tube laboratory configuration.
+
+SITL launch files explicitly select `gazebo`. For real experiments, the ROS
+layer can select the characterized preset automatically from the robot name:
+`glub -> heavy_tube`, `splash -> heavy_tube`, and `bubble -> standard`.
+The presets can also be selected explicitly.
 
 ### Formation and sensing constraints
 
@@ -124,16 +135,24 @@ rotational virtual-speed limit:    2.0 rad/s
 
 ### Adaptive sensing domain
 
-When the conservative sensing domain becomes too restrictive under limited actuation, the controller can temporarily enlarge it toward the physical domain.
-
-For each constraint,
+When limited actuation makes the conservative sensing domain too restrictive,
+the controller can temporarily enlarge only the active constraint domains
+toward their physical limits. For each constraint,
 
 ```text
-h_a = h_c + rho_bar s,
-s in [0, 1].
+h_a = h_c + rho_bar s
 ```
 
-The auxiliary state `s` is governed by a CBF-like condition that maintains a positive physical margin. When the enlargement is no longer needed, the nominal dynamics recover `s -> 0`.
+and the adaptive barrier includes an auxiliary repulsive potential that is
+smoothly activated near a prescribed positive margin. Its contribution becomes
+unbounded as the adaptive constraint approaches that margin, so the adaptation
+does not require the parent velocity or `h_c_dot`. A recovery term drives
+`s -> 0` when enlargement is no longer needed. The state is kept nonnegative
+but is intentionally not clipped at one; values beyond the physical-domain
+threshold are therefore directly visible in the diagnostics.
+
+See [Controller parameters](docs/experiments/controller_parameters.md) for the
+current adaptation parameters and interpretation.
 
 ## Installation
 
@@ -158,6 +177,88 @@ uv run pytest
 uv run ruff check .
 uv run ruff format --check .
 ```
+
+The ROS 2 integration targets ROS 2 Jazzy and lives in the same repository as
+the core package. For its workspace layout, build instructions, and environment
+setup, see [Installation and build](docs/experiments/installation_and_build.md).
+
+## ROS 2 and PX4 integration
+
+The `formation_control_ros` package is a thin runtime adapter around the
+ROS-independent controller. It provides:
+
+- leader and follower controller nodes;
+- PX4 and motion-capture state adapters;
+- explicit NED/FRD to NWU/FLU frame conversion;
+- body-wrench normalization and PX4 offboard output;
+- a centralized `INITIALIZE -> FORMATION` experiment phase manager;
+- adaptive sensing-domain and pool-workspace constraints;
+- controller diagnostics and versioned diagnostic snapshots.
+
+The controller mathematics remains in `src/formation_control`; ROS messages,
+frame conversion, lifecycle supervision, and PX4 communication remain in
+`ros2/formation_control_ros`.
+
+### SITL quick start
+
+After building and sourcing the ROS workspace, start a two-robot PX4/Gazebo
+simulation:
+
+```bash
+ros2 launch formation_control_ros multi_bluerov2_sim.launch.py \
+  robot_count:=2 \
+  px4_dir:=/path/to/PX4-Autopilot
+```
+
+In another terminal, start the Micro XRCE-DDS agent:
+
+```bash
+micro-xrce-dds-agent udp4 -p 8888
+```
+
+Then launch the experiment controllers. Launch files default to dry-run mode;
+keep this enabled until state frames, controller diagnostics, and output signs
+have been verified:
+
+```bash
+ros2 launch formation_control_ros two_robot_experiment.launch.py \
+  dry_run:=true \
+  leader_reference_mode:=velocity \
+  workspace_barrier_enabled:=true \
+  workspace_adaptive:=true
+```
+
+The complete procedures are documented in:
+
+- [SITL setup](docs/experiments/simulation_setup.md)
+- [Launch-file parameters](docs/experiments/launch_parameters.md)
+- [Two-robot experiment](docs/experiments/two_robot_experiment.md)
+- [Three-robot experiment](docs/experiments/three_robot_experiment.md)
+- [Hardware setup and safety](docs/experiments/hardware_setup.md)
+- [Controller parameters](docs/experiments/controller_parameters.md)
+- [Troubleshooting](docs/experiments/troubleshooting.md)
+
+### Experiment logging and plots
+
+ROS experiments can be recorded to a rosbag, exported to a portable
+`formation_history.npz`, and plotted with the same diagnostics used by the
+pure-Python simulations:
+
+```bash
+scripts/record_formation_experiment.sh \
+  --name two_robot_experiment \
+  --robots itrl_rov_1,itrl_rov_2 \
+  --edge itrl_rov_2:itrl_rov_1
+
+python scripts/export_formation_bag.py outputs/experiments/<run>
+
+uv run python scripts/plot_formation_experiment.py \
+  outputs/experiments/<run>/formation_history.npz \
+  --paper --paper-quality --save --format pdf
+```
+
+See [ROS experiment logging and paper-plot pipeline](docs/experiment_logging.md)
+for the snapshot schema, synchronization behavior, and available figures.
 
 ## Examples
 
@@ -337,6 +438,7 @@ src/formation_control/
 ├── actuation/       # BlueROV2 Heavy thruster allocation and limits
 ├── constraints/     # distance and camera sensing constraints
 ├── control/         # command filters, CLF-QP, adaptive-domain logic
+├── experiment/      # portable diagnostic snapshots and run histories
 ├── geometry/        # rigid-body and camera geometry
 ├── graphs/          # directed sensing graphs
 ├── models/          # marine vehicle models
@@ -344,14 +446,23 @@ src/formation_control/
 ├── simulation/      # simulation infrastructure and robustness models
 └── visualization/   # plots and 3-D animations
 
-examples/
-tests/
-docs/media/
+ros2/formation_control_ros/
+├── formation_control_ros/  # ROS nodes and runtime adapters
+├── launch/                 # SITL and experiment launch files
+└── config/                 # shared controller defaults
+
+examples/                 # pure-Python demonstrations and validation cases
+scripts/                  # experiment runners, recording, export, and plotting
+tests/                    # core unit and integration tests
+docs/experiments/         # reproducible SITL and hardware procedures
 ```
 
 ## Current development status
 
-The pure-Python controller contains the intended control architecture and is currently being validated before ROS integration.
+The control core, ROS 2 adapter, PX4/Gazebo SITL workflow, experiment
+logging/plotting pipeline, five-robot SITL scenario, and real-water experiment
+workflow are implemented. The current validation uses the same controller
+architecture in SITL and on the laboratory BlueROV2 vehicles.
 
 Current milestones:
 
@@ -362,29 +473,41 @@ Current milestones:
 - [x] command-filtered backstepping
 - [x] smooth norm saturation of the virtual twist
 - [x] thruster-space CLF-QP
+- [x] wrench-space CLF-QP over the achievable wrench polytope
 - [x] adaptive conservative-to-physical sensing domains
+- [x] adaptive pool-workspace constraints
 - [x] long-horizon seven-robot moving-leader validation
 - [x] common CLF-QP architecture for leader and followers
 - [x] simulation-only uncertainty/noise/delay layer
-- [ ] ROS 2 wrapper
-- [ ] Gazebo/SITL validation
-- [ ] BlueROV2 experimental validation
+- [x] ROS 2 leader/follower integration
+- [x] PX4/Gazebo multi-robot SITL integration
+- [x] two- and three-robot SITL experiment workflows
+- [x] rosbag recording, portable export, and paper-plot pipeline
+- [x] BlueROV2 experimental validation
 
-## ROS integration direction
+## Experiment architecture and safety
 
-The ROS implementation should remain a thin wrapper around the Python control core.
+Experiment launches begin in a centralized `INITIALIZE` phase. The phase
+manager changes to `FORMATION` only after every robot remains sufficiently
+close to its initialization target and sufficiently slow for the configured
+dwell time. Formation control is decentralized over the configured directed
+sensing graph after that handoff.
 
-The wrapper will be responsible for:
+The following must be verified against the physical setup before real-water
+operation:
 
-1. receiving the vehicle state and relative sensing measurements;
-2. maintaining the command-filter state;
-3. maintaining the adaptive-domain state;
-4. converting ROS messages to the core controller inputs;
-5. evaluating the existing controller;
-6. publishing desired body wrench or thruster commands;
-7. exposing diagnostics such as sensing margins, adaptive enlargement, CLF slack, actuation margin, thruster utilization, and fallback state.
+- initialization positions and physical workspace bounds;
+- camera extrinsics and field-of-view parameters;
+- state-estimation frame and velocity conventions;
+- PX4 force/torque normalization and command limits;
+- vehicle namespaces, IDs, health, and offboard behavior;
+- the tested hold, disarm, and lost-sensing failsafe procedure.
 
-The controller mathematics should remain ROS-independent.
+The current controller fallback publishes zero wrench. This is useful for
+simulation but is not a complete hardware failsafe. QGroundControl or another
+tested manual intervention path must remain available during experiments. Use
+the [poolside checklist](docs/experiments/experiment_checklist.md) for an actual
+run.
 
 ## Development
 

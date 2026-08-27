@@ -306,7 +306,7 @@ class BlueROV2LeaderController:
         control_upper: FloatArray | None = None,
     ) -> BlueROV2LeaderEvaluation:
         """Evaluate the common actuator-constrained CLF-QP for the leader."""
-        _, _, generalized_velocity = self.model.split_state(state)
+        _, quaternion, generalized_velocity = self.model.split_state(state)
         (
             configuration_value,
             gradient,
@@ -336,6 +336,11 @@ class BlueROV2LeaderController:
             feedforward_velocity=feedforward_velocity,
             feedforward_velocity_derivative=(feedforward_velocity_derivative),
             control_reference=control_reference,
+            trim_wrench=(
+                None
+                if control_reference is not None
+                else self.model.restoring_wrench(quaternion)
+            ),
             control_lower=control_lower,
             control_upper=control_upper,
         )

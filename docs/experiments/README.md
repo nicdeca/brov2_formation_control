@@ -11,8 +11,9 @@ For a new machine or lab user:
 
 1. Read `installation_and_build.md`.
 2. Read either `simulation_setup.md` or `hardware_setup.md`.
-3. Read `controller_parameters.md`.
-4. Follow `two_robot_experiment.md` or `three_robot_experiment.md`.
+3. Read `controller_parameters.md` and `launch_parameters.md`.
+4. Follow `two_robot_experiment.md`, `three_robot_experiment.md`, or the
+   five-robot SITL procedure in `simulation_setup.md`.
 5. Keep `experiment_checklist.md` open during the run.
 6. Use `troubleshooting.md` if something does not behave as expected.
 
@@ -47,9 +48,8 @@ their parent.
 
 ## Important status
 
-The three-robot SITL configuration has been validated extensively.
-
-The two-robot SITL `cautious` and `full` profiles have also been validated.
+The current validation workflow includes the two-robot profiles, the
+five-robot directed-tree SITL scenario, and real-water BlueROV2 experiments.
 
 Before the first real-water experiment, the following values must be verified
 against the actual Marinarium setup:

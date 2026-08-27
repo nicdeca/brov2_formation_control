@@ -17,7 +17,8 @@ is reused without changing the core control architecture.
 """
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -53,6 +54,10 @@ FORMATION_NAMES = [
     "tree_wide",
     "tree_compact",
     "tree_staggered",
+    "tree_depth_split",
+    "tree_crossed_3d",
+    "tree_opposed_3d",
+    "tree_parallel_3d",
 ]
 
 # Per-edge parent-minus-follower vectors in core NWU.
@@ -71,6 +76,25 @@ FORMATION_NAMES = [
 #   nominal horizontal geometry with alternating depth offsets. The second
 #   level offsets oppose the first level, so z displacement does not accumulate
 #   at the leaf robots.
+#
+# The four formations below are reserved for the challenging profile. Their
+# absolute references at the initial leader position are:
+#
+#                     robot 2                 robot 3
+# depth_split   (-0.50, 2.80, -95.65)  (-1.90, 2.80, -94.85)
+# crossed_3d    (-0.25, 2.45, -95.65)  (-2.15, 2.45, -94.85)
+# opposed_3d    (-2.55, 2.30, -95.65)  ( 0.15, 2.30, -94.85)
+# parallel_3d   (-0.10, 3.40, -95.80)  (-2.30, 3.40, -94.85)
+#
+#                     robot 4                 robot 5
+# depth_split   ( 0.00, 4.25, -96.05)  (-2.40, 4.25, -94.85)
+# crossed_3d    (-2.55, 4.05, -96.05)  ( 0.15, 4.05, -94.85)
+# opposed_3d    (-2.60, 4.60, -96.00)  ( 0.20, 4.60, -94.85)
+# parallel_3d   (-0.10, 5.20, -95.80)  (-2.30, 5.20, -94.85)
+#
+# ``tree_depth_split`` establishes vertical separation before either pair of
+# robots exchanges lateral sides. This keeps even the unconnected robot pairs
+# separated during the large crossed transitions.
 D21_FORMATIONS = [
     -0.70,
     -1.65,
@@ -84,6 +108,18 @@ D21_FORMATIONS = [
     -0.70,
     -1.65,
     0.10,
+    -0.70,
+    -1.65,
+    0.45,
+    -0.95,
+    -1.30,
+    0.45,
+    1.35,
+    -1.15,
+    0.45,
+    -1.10,
+    -2.25,
+    0.60,
 ]
 
 D31_FORMATIONS = [
@@ -99,6 +135,18 @@ D31_FORMATIONS = [
     0.70,
     -1.65,
     -0.10,
+    0.70,
+    -1.65,
+    -0.35,
+    0.95,
+    -1.30,
+    -0.35,
+    -1.35,
+    -1.15,
+    -0.35,
+    1.10,
+    -2.25,
+    -0.35,
 ]
 
 D42_FORMATIONS = [
@@ -114,6 +162,18 @@ D42_FORMATIONS = [
     -0.50,
     -1.45,
     -0.10,
+    -0.50,
+    -1.45,
+    0.40,
+    2.30,
+    -1.60,
+    0.40,
+    0.05,
+    -2.30,
+    0.35,
+    0.00,
+    -1.80,
+    0.00,
 ]
 
 D53_FORMATIONS = [
@@ -129,6 +189,18 @@ D53_FORMATIONS = [
     0.50,
     -1.45,
     0.10,
+    0.50,
+    -1.45,
+    0.00,
+    -2.30,
+    -1.60,
+    0.00,
+    -0.05,
+    -2.30,
+    0.00,
+    0.00,
+    -1.80,
+    0.00,
 ]
 
 
@@ -218,6 +290,7 @@ def generate_launch_description() -> LaunchDescription:
 
     dt = LaunchConfiguration("dt")
     dry_run = LaunchConfiguration("dry_run")
+    gazebo_timer = LaunchConfiguration("gazebo_timer")
     leader_reference_mode = LaunchConfiguration("leader_reference_mode")
 
     position_gain = LaunchConfiguration("position_gain")
@@ -237,8 +310,10 @@ def generate_launch_description() -> LaunchDescription:
 
     common = {
         "dt": dt,
+        "use_sim_time": ParameterValue(gazebo_timer, value_type=bool),
         "state_source": "px4",
         "control_space": "thruster",
+        "robot_configuration": "gazebo",
         "dry_run": dry_run,
         "virtual_linear_gain": ParameterValue(
             virtual_linear_gain,
@@ -287,22 +362,30 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("dt", default_value="0.02"),
         DeclareLaunchArgument("dry_run", default_value="true"),
         DeclareLaunchArgument(
+            "gazebo_timer",
+            default_value="false",
+            description=(
+                "Run leader and follower controller timers from Gazebo "
+                "/clock instead of wall time."
+            ),
+        ),
+        DeclareLaunchArgument(
             "leader_reference_mode",
             default_value="stationary",
         ),
         DeclareLaunchArgument("position_gain", default_value="2.0"),
-        DeclareLaunchArgument("formation_gain", default_value="2.0"),
+        DeclareLaunchArgument("formation_gain", default_value="1.0"),
         DeclareLaunchArgument("virtual_linear_gain", default_value="1.0"),
         DeclareLaunchArgument("virtual_angular_gain", default_value="1.2"),
         DeclareLaunchArgument(
             "command_filter_linear_bandwidth",
-            default_value="3.0",
+            default_value="10.0",
         ),
         DeclareLaunchArgument(
             "command_filter_angular_bandwidth",
-            default_value="4.0",
+            default_value="10.0",
         ),
-        DeclareLaunchArgument("alpha_gain", default_value="1.5"),
+        DeclareLaunchArgument("alpha_gain", default_value="3.0"),
         DeclareLaunchArgument(
             "workspace_barrier_enabled",
             default_value="true",
@@ -310,6 +393,17 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument(
             "workspace_adaptive",
             default_value="true",
+        ),
+        ExecuteProcess(
+            cmd=[
+                "ros2",
+                "run",
+                "ros_gz_bridge",
+                "parameter_bridge",
+                "/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock",
+            ],
+            output="screen",
+            condition=IfCondition(gazebo_timer),
         ),
         OpaqueFunction(function=_phase_manager_setup),
         Node(

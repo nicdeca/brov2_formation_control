@@ -2,12 +2,18 @@
 
 ## Topology
 
-Default:
+The launch defaults to `itrl_rov_1` / `itrl_rov_2`, but hardware names can
+be passed directly. The known laboratory dynamics mapping is
 
 ```text
-itrl_rov_1  leader
-itrl_rov_2  follower
+glub    -> heavy_tube
+splash  -> heavy_tube
+bubble  -> standard
 ```
+
+Both per-robot dynamics arguments default to `auto`, so a command such as
+`leader:=splash follower:=bubble` selects the appropriate characterized models
+without additional arguments.
 
 Formation edge:
 
@@ -48,6 +54,8 @@ ros2 launch formation_control_ros two_robot_experiment.launch.py \
   workspace_barrier_enabled:=true \
   workspace_adaptive:=true
 ```
+
+All launch arguments and defaults are listed in `launch_parameters.md`.
 
 Optional explicit gains:
 
@@ -166,11 +174,12 @@ python scripts/export_formation_bag.py "$RUN"
 Plot:
 
 ```bash
-python scripts/plot_formation_experiment.py \
+uv run python scripts/plot_formation_experiment.py \
   "$RUN/formation_history.npz" \
   --paper \
   --paper-quality \
-  --save
+  --save \
+  --format pdf
 ```
 
 Inspect at minimum:

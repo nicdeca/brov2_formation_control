@@ -95,7 +95,10 @@ class FollowerControllerNode(Node):
 
         self.declare_parameter("adaptive", True)
         self.declare_parameter("relaxation_recovery_gain", 0.8)
-        self.declare_parameter("relaxation_domain_margin_ratio", 0.1)
+        self.declare_parameter("relaxation_barrier_gain", 0.20)
+        self.declare_parameter("relaxation_domain_margin_ratio", 0.10)
+        self.declare_parameter("relaxation_activation_on_ratio", 0.10)
+        self.declare_parameter("relaxation_activation_off_ratio", 0.30)
         self.declare_parameter("use_parent_velocity_in_clf", False)
 
         # Optional experiment-phase gate.  When a non-empty topic is supplied,
@@ -240,10 +243,19 @@ class FollowerControllerNode(Node):
                         "relaxation_recovery_gain"
                     ).value
                 ),
+                relaxation_barrier_gain=float(
+                    self.get_parameter("relaxation_barrier_gain").value
+                ),
                 relaxation_domain_margin_ratio=float(
                     self.get_parameter(
                         "relaxation_domain_margin_ratio"
                     ).value
+                ),
+                relaxation_activation_on_ratio=float(
+                    self.get_parameter("relaxation_activation_on_ratio").value
+                ),
+                relaxation_activation_off_ratio=float(
+                    self.get_parameter("relaxation_activation_off_ratio").value
                 ),
                 use_parent_velocity_in_clf=bool(
                     self.get_parameter(

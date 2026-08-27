@@ -403,6 +403,7 @@ def build_edge_potential(
     enlargement: np.ndarray,
     *,
     adaptive: bool,
+    formation_gain: float = 1.0,
 ) -> EdgePotential:
     desired_relative = scenario.desired_relative_position(observer, target)
     desired_image = NormalizedImagePoint(0.0, 0.0)
@@ -441,7 +442,7 @@ def build_edge_potential(
     return EdgePotential(
         formation=RelativePositionPotential.isotropic(
             desired_relative,
-            gain=1.0,
+            gain=formation_gain,
         ),
         image_centering=ImageCenteringPotential(
             horizontal_gain=0.7,
@@ -1000,7 +1001,7 @@ def simulate(
                 dt,
             )
             next_states[observer] = plant_integrator.step(
-                model,
+                plant_model,
                 states[observer],
                 evaluation.wrench_body,
                 dt,

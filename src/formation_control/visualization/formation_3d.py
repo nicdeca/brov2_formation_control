@@ -31,6 +31,22 @@ from .style import apply_visualization_style
 from .vehicle_geometry import RigidBodyWireframe
 
 
+@dataclass(frozen=True, slots=True)
+class DesiredVehicleStyle3D:
+    """Visual style for understated desired-vehicle wireframes."""
+
+    color: str = "0.45"
+    alpha: float = 0.24
+    linestyle: str = "--"
+    linewidth_scale: float = 0.85
+
+    def __post_init__(self) -> None:
+        if not (0.0 <= self.alpha <= 1.0):
+            raise ValueError("alpha must lie in [0, 1].")
+        if self.linewidth_scale <= 0.0:
+            raise ValueError("linewidth_scale must be positive.")
+
+
 def _xyz(positions: FloatArray) -> FloatArray:
     if positions.shape[-1] < 3:
         raise ValueError("3-D visualization requires at least three coordinates.")
@@ -155,6 +171,9 @@ def _add_wireframe(
     quaternion: FloatArray,
     *,
     color,
+    alpha_scale: float = 1.0,
+    linestyle: str | None = None,
+    linewidth_scale: float = 1.0,
 ) -> list[Line3DCollection]:
     rotation = rotation_matrix_from_quaternion(quaternion)
     transformed = geometry.transform(position, rotation)
@@ -167,9 +186,9 @@ def _add_wireframe(
     ):
         artist = Line3DCollection(
             segments,
-            linewidths=part.linewidth,
-            alpha=part.alpha,
-            linestyles=part.linestyle,
+            linewidths=part.linewidth * linewidth_scale,
+            alpha=part.alpha * alpha_scale,
+            linestyles=part.linestyle if linestyle is None else linestyle,
             colors=[color],
         )
         axes.add_collection3d(artist)
@@ -371,6 +390,8 @@ def animate_formation_3d(
     graph: DirectedSensingGraph,
     *,
     desired_positions: FloatArray | None = None,
+    desired_position_history: FloatArray | None = None,
+    desired_vehicle_style: DesiredVehicleStyle3D | None = None,
     camera: PinholeCamera | None = None,
     camera_agents: Iterable[int] | None = None,
     camera_depth: float = 0.8,
@@ -419,11 +440,44 @@ def animate_formation_3d(
     axes.view_init(elev=elevation, azim=azimuth)
 
     desired = None
+    desired_history = None
     all_points = positions
-    if desired_positions is not None:
+
+    if desired_positions is not None and desired_position_history is not None:
+        raise ValueError(
+            "Supply either desired_positions or desired_position_history, not both."
+        )
+
+    if desired_position_history is not None:
+        desired_history = np.asarray(desired_position_history, dtype=float)
+        if (
+            desired_history.ndim != 3
+            or desired_history.shape[0] != trajectory.n_samples
+            or desired_history.shape[1] != trajectory.n_agents
+            or desired_history.shape[2] < 3
+        ):
+            raise ValueError(
+                "desired_position_history must have shape "
+                "(n_samples, n_agents, dimension >= 3)."
+            )
+        finite_desired = desired_history[..., :3][
+            np.all(np.isfinite(desired_history[..., :3]), axis=-1)
+        ]
+        if finite_desired.size:
+            all_points = np.concatenate(
+                (
+                    positions.reshape(-1, trajectory.n_agents, 3),
+                    desired_history[..., :3],
+                ),
+                axis=0,
+            )
+    elif desired_positions is not None:
         desired = np.asarray(desired_positions, dtype=float)
         if desired.shape[0] != trajectory.n_agents or desired.shape[1] < 3:
-            raise ValueError("desired_positions must have shape (n_agents, dimension >= 3).")
+            raise ValueError(
+                "desired_positions must have shape "
+                "(n_agents, dimension >= 3)."
+            )
         all_points = np.concatenate(
             (positions, desired[None, :, :3]),
             axis=0,
@@ -437,7 +491,15 @@ def animate_formation_3d(
             label="desired",
         )
 
-    _set_equal_axes(axes, all_points)
+    # Ignore NaN reference samples when fixing the scene limits. This allows
+    # reference vehicles to appear only once a reference becomes available.
+    finite_points = all_points.reshape(-1, 3)
+    finite_points = finite_points[np.all(np.isfinite(finite_points), axis=1)]
+    if finite_points.size == 0:
+        finite_points = positions.reshape(-1, 3)
+    limit_points = finite_points[:, None, :]
+
+    _set_equal_axes(axes, limit_points)
     axes.set_xlabel(r"$x$ [m]")
     axes.set_ylabel(r"$y$ [m]")
     axes.set_zlabel(r"$z$ [m]")
@@ -492,6 +554,34 @@ def animate_formation_3d(
                     color=agent_colors[agent],
                 )
             )
+
+    desired_vehicle_artists: list[list[Line3DCollection]] = []
+    if desired_history is not None and vehicle_geometry is not None:
+        if trajectory.quaternions is None:
+            raise ValueError(
+                "desired vehicle wireframes require trajectory.quaternions."
+            )
+        style = desired_vehicle_style or DesiredVehicleStyle3D()
+        initial_quaternions = trajectory.quaternions[0]
+        initial_desired = desired_history[0, :, :3]
+        for agent in range(trajectory.n_agents):
+            position = initial_desired[agent]
+            if not np.all(np.isfinite(position)):
+                position = np.zeros(3)
+            artists = _add_wireframe(
+                axes,
+                vehicle_geometry,
+                position,
+                initial_quaternions[agent],
+                color=style.color,
+                alpha_scale=style.alpha,
+                linestyle=style.linestyle,
+                linewidth_scale=style.linewidth_scale,
+            )
+            visible = bool(np.all(np.isfinite(initial_desired[agent])))
+            for artist in artists:
+                artist.set_visible(visible)
+            desired_vehicle_artists.append(artists)
 
     body_axes = []
     if show_body_forward:
@@ -563,6 +653,25 @@ def animate_formation_3d(
                         current_quaternions[agent],
                     )
 
+                if desired_history is not None:
+                    desired_current = desired_history[frame, :, :3]
+                    for agent, artists in enumerate(desired_vehicle_artists):
+                        visible = bool(
+                            np.all(np.isfinite(desired_current[agent]))
+                        )
+                        for artist in artists:
+                            artist.set_visible(visible)
+                        if visible:
+                            # Only desired positions are specified by the
+                            # formation/reference layer. Reusing the measured
+                            # attitude avoids inventing a desired orientation.
+                            _update_wireframe(
+                                artists,
+                                vehicle_geometry,
+                                desired_current[agent],
+                                current_quaternions[agent],
+                            )
+
             for agent, artist in enumerate(body_axes):
                 rotation = rotation_matrix_from_quaternion(current_quaternions[agent])
                 endpoint = current[agent] + body_axis_length * rotation[:, 0]
@@ -607,6 +716,11 @@ def animate_formation_3d(
             *edge_artists,
             *body_axes,
             *(artist for artists in vehicle_artists for artist in artists),
+            *(
+                artist
+                for artists in desired_vehicle_artists
+                for artist in artists
+            ),
             *(artist for artists in camera_artists.values() for artist in artists),
             time_text,
         ]
