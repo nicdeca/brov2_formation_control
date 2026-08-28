@@ -37,6 +37,8 @@ class DiagnosticsPublisher:
             "formation_control/thruster_utilization",
             10,
         )
+
+        # Four-channel sensing-domain diagnostics.
         self._physical_margin = node.create_publisher(
             Float64,
             "formation_control/minimum_physical_margin",
@@ -53,9 +55,10 @@ class DiagnosticsPublisher:
             10,
         )
 
-        # Workspace diagnostics intentionally use separate topics so the
-        # existing four-channel sensing-domain topic keeps its meaning.
-        self._workspace_enabled = node.create_publisher(
+        # Six-channel Stage-B workspace diagnostics.  These are deliberately
+        # separate from the sensing-domain fields above.  The recorder and
+        # initialization exporter already use these topic names.
+        self._workspace_barrier_enabled = node.create_publisher(
             Bool,
             "formation_control/workspace_barrier_enabled",
             10,
@@ -91,6 +94,12 @@ class DiagnosticsPublisher:
             10,
         )
 
+    @staticmethod
+    def _multi_array(values) -> Float64MultiArray:
+        message = Float64MultiArray()
+        message.data = [float(value) for value in values]
+        return message
+
     def publish(
         self,
         diagnostics: ControllerDiagnostics,
@@ -120,55 +129,41 @@ class DiagnosticsPublisher:
         self._utilization.publish(
             Float64(data=diagnostics.thruster_utilization)
         )
+
         self._physical_margin.publish(
             Float64(data=diagnostics.minimum_physical_margin)
         )
+        self._relaxation.publish(
+            self._multi_array(diagnostics.relaxation_state)
+        )
+        self._conservative_values.publish(
+            self._multi_array(diagnostics.conservative_constraint_values)
+        )
 
-        relaxation = Float64MultiArray()
-        relaxation.data = [
-            float(value) for value in diagnostics.relaxation_state
-        ]
-        self._relaxation.publish(relaxation)
-
-        conservative = Float64MultiArray()
-        conservative.data = [
-            float(value)
-            for value in diagnostics.conservative_constraint_values
-        ]
-        self._conservative_values.publish(conservative)
-
-        self._workspace_enabled.publish(
-            Bool(data=diagnostics.workspace_barrier_enabled)
+        self._workspace_barrier_enabled.publish(
+            Bool(data=bool(diagnostics.workspace_barrier_enabled))
         )
         self._workspace_adaptive.publish(
-            Bool(data=diagnostics.workspace_adaptive)
+            Bool(data=bool(diagnostics.workspace_adaptive))
         )
         self._workspace_barrier_value.publish(
-            Float64(data=diagnostics.workspace_barrier_value)
+            Float64(data=float(diagnostics.workspace_barrier_value))
         )
-
-        workspace_relaxation = Float64MultiArray()
-        workspace_relaxation.data = [
-            float(value)
-            for value in diagnostics.workspace_relaxation_state
-        ]
-        self._workspace_relaxation.publish(workspace_relaxation)
-
-        workspace_conservative = Float64MultiArray()
-        workspace_conservative.data = [
-            float(value)
-            for value in diagnostics.workspace_conservative_constraint_values
-        ]
-        self._workspace_conservative_values.publish(workspace_conservative)
-
-        workspace_physical = Float64MultiArray()
-        workspace_physical.data = [
-            float(value)
-            for value in diagnostics.workspace_physical_constraint_values
-        ]
-        self._workspace_physical_values.publish(workspace_physical)
+        self._workspace_relaxation.publish(
+            self._multi_array(diagnostics.workspace_relaxation_state)
+        )
+        self._workspace_conservative_values.publish(
+            self._multi_array(
+                diagnostics.workspace_conservative_constraint_values
+            )
+        )
+        self._workspace_physical_values.publish(
+            self._multi_array(
+                diagnostics.workspace_physical_constraint_values
+            )
+        )
         self._workspace_physical_margin.publish(
-            Float64(data=diagnostics.workspace_minimum_physical_margin)
+            Float64(data=float(diagnostics.workspace_minimum_physical_margin))
         )
 
     def publish_fallback(self) -> None:

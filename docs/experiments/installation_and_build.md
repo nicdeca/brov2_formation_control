@@ -52,8 +52,10 @@ The currently maintained workflow uses:
 ```text
 scripts/record_formation_experiment.sh
 scripts/record_formation_experiment.py
+scripts/export_experiment.py
 scripts/export_initialization_bag.py
 scripts/export_formation_bag.py
+scripts/plot_experiment.py
 scripts/plot_initialization_experiment.py
 scripts/plot_formation_experiment.py
 scripts/run_two_robot_experiment.py
@@ -75,10 +77,12 @@ source setup_ros2.sh
 source ~/discower_ws/install/setup.bash
 ```
 
-The standard mission plotter is ROS-independent once the NPZ has been exported
-and can normally be run through the core environment:
+The umbrella plotter and the standard mission plotter are ROS-independent once
+the NPZ files have been exported and can normally be run through the core
+environment:
 
 ```bash
+uv run python scripts/plot_experiment.py <RUN>
 uv run python scripts/plot_formation_experiment.py ...
 ```
 

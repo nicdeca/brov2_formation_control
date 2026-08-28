@@ -211,11 +211,10 @@ def write_manifest(
 
 
 def run_postprocessing(run_dir: Path, *, mission_exists: bool) -> None:
+    """Export and plot every phase available in the completed run."""
     scripts_dir = Path(__file__).resolve().parent
-    export_script = scripts_dir / "export_formation_bag.py"
-    init_export_script = scripts_dir / "export_initialization_bag.py"
-    init_plot_script = scripts_dir / "plot_initialization_experiment.py"
-    mission_plot_script = scripts_dir / "plot_formation_experiment.py"
+    export_script = scripts_dir / "export_experiment.py"
+    plot_script = scripts_dir / "plot_experiment.py"
 
     def call(command: list[str], label: str) -> None:
         print(f"\n=== {label} ===", flush=True)
@@ -226,54 +225,17 @@ def run_postprocessing(run_dir: Path, *, mission_exists: bool) -> None:
                 file=sys.stderr,
             )
 
-    init_bag = run_dir / "initialization" / "bag"
-    if init_bag.exists():
-        call(
-            [
-                sys.executable,
-                str(init_export_script),
-                str(run_dir),
-            ],
-            "Export initialization",
-        )
-        init_history = run_dir / "initialization" / "initialization_history.npz"
-        if init_history.exists():
-            call(
-                [
-                    sys.executable,
-                    str(init_plot_script),
-                    str(init_history),
-                    "--save",
-                ],
-                "Plot initialization",
-            )
-
-    if mission_exists:
-        mission_bag = run_dir / "mission" / "bag"
-        if mission_bag.exists():
-            call(
-                [
-                    sys.executable,
-                    str(export_script),
-                    str(run_dir),
-                    "--phase",
-                    "mission",
-                ],
-                "Export mission",
-            )
-            mission_history = run_dir / "mission" / "formation_history.npz"
-            if mission_history.exists():
-                call(
-                    [
-                        sys.executable,
-                        str(mission_plot_script),
-                        str(mission_history),
-                        "--paper",
-                        "--paper-quality",
-                        "--save",
-                    ],
-                    "Plot mission",
-                )
+    # `export_experiment.py` and `plot_experiment.py` both skip unavailable
+    # phases. This means a failed initialization run still produces useful
+    # initialization output without requiring a mission bag.
+    call(
+        [sys.executable, str(export_script), str(run_dir)],
+        "Export experiment",
+    )
+    call(
+        [sys.executable, str(plot_script), str(run_dir)],
+        "Plot experiment",
+    )
 
 
 def main() -> None:

@@ -538,20 +538,32 @@ class FollowerControllerNode(Node):
 
     def _measurements_fresh(self) -> bool:
         now = self._now_seconds()
-        return (
+        self_fresh = (
             self._self_state is not None
-            and self._parent_state is not None
             and now - self._self_receipt <= self.measurement_timeout
+        )
+        if self._experiment_phase == "INITIALIZE":
+            # Absolute initialization only needs the follower's own state.
+            return self_fresh
+
+        parent_fresh = (
+            self._parent_state is not None
             and now - self._parent_receipt <= self.measurement_timeout
         )
+        return self_fresh and parent_fresh
 
     def _control_step(self) -> None:
         if not self.px4.enabled and not self.dry_run:
             return
 
         if not self._measurements_fresh():
+            required = (
+                "self odometry"
+                if self._experiment_phase == "INITIALIZE"
+                else "self/parent odometry"
+            )
             self.get_logger().warn(
-                "Waiting for fresh self/parent odometry.",
+                f"Waiting for fresh {required}.",
                 throttle_duration_sec=2.0,
             )
             if not self.dry_run:
@@ -561,7 +573,6 @@ class FollowerControllerNode(Node):
             return
 
         assert self._self_state is not None
-        assert self._parent_state is not None
 
         try:
             if self._experiment_phase == "INITIALIZE":
@@ -570,6 +581,7 @@ class FollowerControllerNode(Node):
                 # FollowerCoreRuntime remains uninitialized during INITIALIZE,
                 # so its command filter and adaptive-domain state are initialized
                 # from the actual state at the FORMATION transition.
+                assert self._parent_state is not None
                 result = self.runtime.step(
                     self._self_state,
                     self._parent_state,
@@ -593,11 +605,16 @@ class FollowerControllerNode(Node):
             result.diagnostics,
             fallback=False,
         )
-        if (
-            self._experiment_phase == "FORMATION"
-            and result.snapshot is not None
-        ):
-            self.snapshot_publisher.publish(result.snapshot)
+        if result.snapshot is not None:
+            snapshot = result.snapshot
+            if self._experiment_phase == "INITIALIZE":
+                # INITIALIZE is executed with a LeaderCoreRuntime because it is
+                # absolute-position tracking. Publish that snapshot as well so
+                # the exact follower initialization reference is recorded, but
+                # preserve the follower role in the serialized diagnostics.
+                snapshot = dict(snapshot)
+                snapshot["role"] = 0.0
+            self.snapshot_publisher.publish(snapshot)
 
 
 def main(args=None) -> None:
