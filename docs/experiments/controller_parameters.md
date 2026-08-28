@@ -1,128 +1,160 @@
 # Controller and experiment parameters
 
-This page summarizes the main tuning parameters exposed by the current ROS
-controller.
+This page summarizes the parameters most relevant to the maintained experiment
+launches. Launch-specific defaults take precedence over generic/core defaults.
 
-## Robot dynamics preset
+## Dynamics preset
 
-The model presets are `gazebo`, `standard`, and `heavy_tube`.
-
-- `gazebo`: current PX4/Gazebo SITL dynamics;
-- `standard`: characterized standard laboratory configuration;
-- `heavy_tube`: characterized heavy-tube configuration.
-
-The ROS layer also accepts `auto`, which maps `glub` and `splash` to
-`heavy_tube` and `bubble` to `standard`. Unknown names fail explicitly in
-`auto` mode. Five-robot SITL uses `gazebo` explicitly; the real two-robot
-launch defaults each robot to `auto`.
-
-See `launch_parameters.md` for the launch-file interface.
-
-## Geometric/task gains
-
-### `position_gain`
-
-Leader position-potential gain.
-
-Typical validated SITL value:
+The physical/model presets are:
 
 ```text
-3.0
+gazebo      PX4/Gazebo SITL model
+standard    characterized standard laboratory configuration
+heavy_tube  characterized heavy-tube configuration
 ```
 
-Higher values make leader position errors produce stronger virtual motion.
-
-### `formation_gain`
-
-Follower relative-position-potential gain.
-
-Typical validated SITL value:
+At the ROS layer, `auto` maps:
 
 ```text
-3.0
+glub    -> heavy_tube
+splash  -> heavy_tube
+bubble  -> standard
 ```
 
-Higher values make formation error produce a stronger virtual command.
+Unknown names fail explicitly in `auto` mode. For SITL with physical-looking
+names such as `splash` and `glub`, explicitly select `gazebo` so the controller
+does not use the real-hardware dynamics model.
 
-## Backstepping virtual-velocity gain
+## Main gain defaults by maintained launch
 
-The controller constructs a virtual generalized velocity from the configuration
-potential gradient. The exposed isotropic translational/angular parameters are:
+### Normal two-robot experiment
 
 ```text
-virtual_linear_gain
-virtual_angular_gain
+position_gain                     = 2.0
+formation_gain                    = 2.0
+virtual_linear_gain               = 0.55
+virtual_angular_gain              = 0.80
+command_filter_linear_bandwidth   = 3.0
+command_filter_angular_bandwidth  = 4.0
+alpha_gain                        = 1.8
 ```
 
-Defaults preserving the original controller behavior:
+### Dedicated adaptive two-robot mission
 
 ```text
-virtual_linear_gain  = 0.55
-virtual_angular_gain = 0.80
+position_gain                     = 2.0
+formation_gain                    = 1.4
+virtual_linear_gain               = 0.55
+virtual_angular_gain              = 0.80
+command_filter_linear_bandwidth   = 3.0
+command_filter_angular_bandwidth  = 4.0
+alpha_gain                        = 0.8
 ```
 
-These correspond to the translational/angular entries of `K_eta`.
-
-## Command-filter bandwidth
-
-The first-order generalized-velocity command filter uses:
+### Five-robot tree SITL
 
 ```text
-command_filter_linear_bandwidth
-command_filter_angular_bandwidth
+position_gain                     = 2.0
+formation_gain                    = 1.0
+virtual_linear_gain               = 1.0
+virtual_angular_gain              = 1.2
+command_filter_linear_bandwidth   = 10.0
+command_filter_angular_bandwidth  = 10.0
+alpha_gain                        = 3.0
 ```
 
-Defaults:
+Do not mix these values casually: the dedicated adaptive mission intentionally
+uses a different sensing domain and controller tuning from the normal hardware
+experiment.
+
+## Command-filtered backstepping
+
+The follower constructs a virtual generalized-velocity command from the
+configuration/barrier gradient and tracks a first-order filtered version.
+This avoids requiring the unavailable parent velocity to differentiate the
+virtual command directly.
+
+Larger virtual gains produce stronger configuration correction. Larger command
+filter bandwidth follows the virtual command faster but may create larger
+acceleration/wrench transients after formation switches.
+
+## CLF-QP and actuation
+
+The online optimization variable is the eight-thruster force vector, not a free
+six-dimensional wrench. Thruster box constraints are enforced directly.
+
+`alpha_gain` controls the requested CLF dissipation. Increasing it can increase
+required actuation and CLF slack.
+
+Always inspect:
+
+- all eight thruster forces and signed limits;
+- required zero-slack CLF slack;
+- actuation margin;
+- fallback state;
+- controller execution time.
+
+## Normal two-robot sensing domain
+
+The normal two-robot formation library is documented against approximately:
 
 ```text
-command_filter_linear_bandwidth  = 3.0
-command_filter_angular_bandwidth = 4.0
+d_min               = 0.5 m
+d_max               = 3.6 m
+d_min_conservative  = 0.8 m
+d_max_conservative  = 3.0 m
+alpha_h_conservative = 0.72
+alpha_v_conservative = 0.72
 ```
 
-Larger values make the filtered generalized-velocity command follow the virtual
-velocity more rapidly, but can also create larger required accelerations/wrench
-transients after abrupt formation switches.
+The `challenging` profile includes targets that intentionally enter the
+relaxable conservative region while remaining inside the physical sensing
+limits.
 
-## CLF decay
+## Dedicated adaptive-mission sensing domain
+
+`two_robot_adaptive_mission.launch.py` intentionally tightens the conservative
+domain:
 
 ```text
-alpha_gain
+d_min                  = 0.5 m
+d_max                  = 3.6 m
+d_min_conservative     = 0.8 m
+d_max_conservative     = 2.4 m
+alpha_h_conservative   = 0.45
+alpha_v_conservative   = 0.45
 ```
 
-Default:
+Final smooth-adaptation tuning:
 
 ```text
-0.8
+relaxation_recovery_gain          = 0.8
+relaxation_barrier_gain           = 0.20
+relaxation_domain_margin_ratio    = 0.02
+relaxation_activation_on_ratio    = 0.001
+relaxation_activation_off_ratio   = 0.15
 ```
 
-This controls the requested CLF decay rate in the QP. Increasing it makes the
-dynamic CLF constraint more aggressive and can increase actuator demand.
+The adaptation is margin driven and does not require `h_c_dot` or parent
+velocity. The normalized enlargement state is nonnegative and is **not**
+clipped at one. `s = 1` corresponds to the zero set reaching the physical
+limit; values above one therefore require explicit inspection of the physical
+constraint margin.
 
-## Virtual speed limits
+## Workspace adaptation
 
-```text
-virtual_linear_speed_limit  = 1.5
-virtual_angular_speed_limit = 2.0
-```
-
-These limit the virtual generalized-velocity command.
-
-## Workspace barrier
-
-Main parameters:
+The maintained launches currently use:
 
 ```text
-workspace_barrier_enabled
-workspace_adaptive
-workspace_physical_lower
-workspace_physical_upper
-workspace_conservative_lower
-workspace_conservative_upper
-workspace_barrier_weight
-workspace_reference_margin
-workspace_relaxation_recovery_gain
-workspace_relaxation_domain_margin_ratio
-workspace_minimum_constraint_margin
+workspace_physical_lower      = [0.300, -1.975, -2.155]
+workspace_physical_upper      = [7.100,  1.975,  0.225]
+workspace_conservative_lower  = [0.450, -1.825, -1.955]
+workspace_conservative_upper  = [6.950,  1.825, -0.325]
+workspace_barrier_weight      = 0.10
+workspace_reference_margin    = 0.05
+workspace_relaxation_recovery_gain       = 0.8
+workspace_relaxation_domain_margin_ratio = 0.10
+workspace_minimum_constraint_margin      = 1e-3
 ```
 
 Modes:
@@ -131,54 +163,19 @@ Modes:
 workspace_barrier_enabled=false
     no workspace barrier
 
-workspace_barrier_enabled=true
-workspace_adaptive=false
+workspace_barrier_enabled=true, workspace_adaptive=false
     fixed conservative workspace
 
-workspace_barrier_enabled=true
-workspace_adaptive=true
-    conservative workspace may relax toward physical safe bounds
+workspace_barrier_enabled=true, workspace_adaptive=true
+    conservative workspace can enlarge toward the physical bounds
 ```
 
-## Sensing-domain parameters
-
-Range:
-
-```text
-d_min                  = 0.5
-d_max                  = 3.6
-d_min_conservative     = 0.8
-d_max_conservative     = 3.0
-```
-
-Conservative normalized FoV:
-
-```text
-alpha_h_conservative = 0.72
-alpha_v_conservative = 0.72
-```
-
-The adaptive sensing state has four channels:
-
-```text
-[collision, range, horizontal_fov, vertical_fov]
-```
-
-The current sensing adaptation is derivative-free with respect to parent
-motion. Each adaptive constraint uses a smooth activation of an auxiliary
-barrier potential near a positive margin. The potential becomes unbounded as
-the adaptive constraint approaches that margin, while a recovery term drives
-the enlargement state back toward zero away from the boundary. Consequently,
-the mechanism does not require the parent velocity or `h_c_dot`.
-
-The enlargement state is constrained to remain nonnegative but is not clipped
-to `[0,1]`. Reaching `s=1` places the zero level set at the corresponding
-physical limit; larger values therefore indicate enlargement beyond that
-nominal physical-domain span and must be monitored in the diagnostics.
+Sensing-domain adaptation and workspace-domain adaptation are separate
+mechanisms and should be diagnosed separately.
 
 ## Initialization handoff
 
-Typical SITL values:
+The maintained phase-manager settings are
 
 ```text
 position_tolerance = 0.65 m
@@ -186,27 +183,15 @@ speed_tolerance    = 0.08 m/s
 settle_time        = 1.5 s
 ```
 
-The loose absolute-position tolerance is intentional: initialization establishes
-a safe/slow starting geometry rather than precision absolute station keeping.
+The loose position tolerance is intentional: initialization establishes a
+safe, slow starting geometry rather than precision absolute station keeping.
 
 ## Recommended tuning order
 
-Do not change everything at once.
-
-Suggested order:
-
-1. verify frames and references;
-2. tune `position_gain` / `formation_gain`;
-3. inspect actuator saturation;
-4. tune `virtual_linear_gain`;
-5. tune `command_filter_linear_bandwidth`;
-6. tune `alpha_gain`;
-7. only then consider angular-side tuning if needed.
-
-Always compare:
-
-- formation / leader tracking;
-- thruster forces and force limits;
-- CLF slack / actuation margin;
-- sensing relaxation;
-- workspace relaxation and physical margin.
+1. verify pool/PX4/core frames and camera geometry;
+2. verify initialization and workspace references;
+3. tune position/formation gains;
+4. inspect thruster saturation and actuation margin;
+5. tune virtual gains and command-filter bandwidth;
+6. tune CLF decay;
+7. only then modify sensing/workspace adaptation parameters.
