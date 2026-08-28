@@ -4,7 +4,7 @@
 Run from the ROS environment, e.g.::
 
     source setup_ros2.sh
-    python scripts/export_formation_bag.py outputs/experiments/<run>
+    python scripts/export_formation_bag.py outputs/experiments/<run> --phase mission
 
 The resulting ``formation_history.npz`` is the only input needed by
 ``plot_formation_experiment.py``.
@@ -251,10 +251,22 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("run_dir", type=Path)
     parser.add_argument(
+        "--phase",
+        choices=("initialization", "mission"),
+        default=None,
+        help=(
+            "phase to export for the split recording layout; when omitted, "
+            "legacy <run_dir>/bag is used if present, otherwise mission"
+        ),
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=None,
-        help="default: <run_dir>/formation_history.npz",
+        help=(
+            "output NPZ path; default is <run_dir>/<phase>/formation_history.npz "
+            "for split recordings or <run_dir>/formation_history.npz for legacy runs"
+        ),
     )
     parser.add_argument(
         "--reference-robot",
@@ -273,7 +285,26 @@ def main() -> None:
     manifest = load_manifest(run_dir)
     robots = [str(robot) for robot in manifest["robots"]]
     edges = list(manifest.get("edges", []))
-    bag = read_bag(run_dir / "bag")
+
+    if args.phase is not None:
+        phase_name = args.phase
+        phase_dir = run_dir / phase_name
+    elif (run_dir / "bag").exists():
+        phase_name = "legacy"
+        phase_dir = run_dir
+    elif (run_dir / "mission" / "bag").exists():
+        phase_name = "mission"
+        phase_dir = run_dir / "mission"
+    else:
+        raise FileNotFoundError(
+            "No rosbag found. Expected <run_dir>/bag or "
+            "<run_dir>/<initialization|mission>/bag."
+        )
+
+    bag_dir = phase_dir / "bag"
+    if not bag_dir.exists():
+        raise FileNotFoundError(f"missing rosbag directory: {bag_dir}")
+    bag = read_bag(bag_dir)
 
     diagnostic_topics = {
         robot: f"/{robot}/formation_control/diagnostic_snapshot" for robot in robots
@@ -488,17 +519,21 @@ def main() -> None:
         "edges": edges,
         "reference_robot": reference_robot,
         "source_run_dir": str(run_dir),
+        "recording_phase": phase_name,
         "max_sync_ms": float(args.max_sync_ms),
         "time_source": time_source,
     }
 
-    output = args.output or run_dir / "formation_history.npz"
+    output = (args.output or phase_dir / "formation_history.npz").expanduser().resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
     FormationExperimentHistory(arrays=arrays, metadata=metadata).save(output)
 
     print(f"Exported {n_samples} synchronized controller samples")
+    print(f"Recording phase: {phase_name}")
     print(f"Duration: {times[-1]:.3f} s")
     print(f"Time source: {time_source}")
     print(f"History: {output}")
+    print(f"Absolute output folder: {output.parent}")
 
 
 if __name__ == "__main__":
