@@ -1,79 +1,33 @@
-# Three-robot SITL experiment
+# Three-robot experiment — legacy reference
 
-## Topology
+> **Status:** not part of the current canonical experiment workflow.
 
-```text
-itrl_rov_1 leader
-
-itrl_rov_2 -> itrl_rov_1
-itrl_rov_3 -> itrl_rov_1
-```
-
-The phase manager releases `FORMATION` only after all three robots satisfy the
-initialization handoff condition.
-
-After release, the two follower controllers operate independently.
-
-## Controller launch
-
-```bash
-ros2 launch formation_control_ros three_robot_experiment.launch.py \
-  dry_run:=false \
-  leader_reference_mode:=velocity \
-  workspace_barrier_enabled:=true \
-  workspace_adaptive:=true
-```
-
-The validated SITL tuning used geometric gains around:
+The historical three-robot launches used a star topology
 
 ```text
-position_gain = 3.0
-formation_gain = 3.0
+2 -> 1
+3 -> 1
 ```
 
-## Recorder
+and were developed before the pool-frame re-anchoring. The archived launch
+files still contain old absolute coordinates around `z = -95 m` and old
+workspace bounds. Running them unchanged with the current pool-aligned Gazebo
+world is unsafe/inconsistent.
 
-```bash
-scripts/record_formation_experiment.sh \
-  --name three_robot_experiment \
-  --robots itrl_rov_1,itrl_rov_2,itrl_rov_3 \
-  --edge itrl_rov_2:itrl_rov_1 \
-  --edge itrl_rov_3:itrl_rov_1
-```
+The current maintained scaling experiment is the five-robot depth-two tree in
+`five_robot_tree_experiment.md`. For normal two-robot hardware/SITL work, use
+`two_robot_experiment.md`.
 
-## Runner
+If a three-robot experiment is needed again, port it explicitly by:
 
-```bash
-python scripts/run_three_robot_experiment.py
-```
+1. expressing all absolute initialization positions in the current pool-aligned
+   core NWU frame;
+2. rotating all parent-minus-follower formation vectors consistently;
+3. using the current shared workspace bounds;
+4. selecting `gazebo` explicitly for SITL dynamics;
+5. adding `mission_status` publication to the runner so split recording works;
+6. validating all formations against the current tank geometry before arming.
 
-The final validated scripted experiment uses clearly distinct formation
-references and a large leader excursion while remaining inside the configured
-workspace.
-
-## What to inspect
-
-For both follower edges:
-
-- actual vs desired relative position components;
-- formation-error norm;
-- sensing-domain relaxation.
-
-For all three robots:
-
-- workspace position vs conservative/adaptive/physical bounds;
-- workspace relaxation;
-- thruster forces and signed limits;
-- controller timing;
-- actuation feasibility.
-
-For the leader:
-
-- actual vs reference position;
-- position/velocity tracking-error norms.
-
-## Known limitation
-
-With the star topology there is no explicit follower-follower sensing/collision
-edge between robots 2 and 3. Prescribed experiment formations must therefore
-remain safely separated.
+Do not use the old `three_robot_px4_sitl.launch.py`,
+`three_robot_sim_experiment.launch.py`, or old three-robot mission runner as a
+shortcut around this port.

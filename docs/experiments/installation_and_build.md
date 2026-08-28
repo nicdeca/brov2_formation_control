@@ -27,43 +27,70 @@ colcon build \
 source ~/discower_ws/install/setup.bash
 ```
 
-If the generated ROS Python entry points contain an invalid interpreter line,
-reapply the known shebang workaround:
+After substantial ROS-package changes, a clean package rebuild can avoid stale
+installed entry points:
 
 ```bash
-sed -i '1c #!/usr/bin/env python3' \
-  ~/discower_ws/install/formation_control_ros/lib/formation_control_ros/leader_controller \
-  ~/discower_ws/install/formation_control_ros/lib/formation_control_ros/follower_controller \
-  ~/discower_ws/install/formation_control_ros/lib/formation_control_ros/offboard_heartbeat_wrench \
-  ~/discower_ws/install/formation_control_ros/lib/formation_control_ros/experiment_phase_manager
+cd ~/discower_ws
+rm -rf build/formation_control_ros install/formation_control_ros
+source src/brov2_formation_control/setup_ros2.sh
+colcon build --packages-select formation_control_ros --symlink-install
+source install/setup.bash
 ```
 
-## Python environment for offline tools
+If the generated ROS Python entry points contain an invalid interpreter line,
+use the repository workaround:
 
-From the repository:
+```bash
+bash src/brov2_formation_control/scripts/fix_ros2_shebangs.sh
+```
+
+## Offline / experiment scripts
+
+The currently maintained workflow uses:
+
+```text
+scripts/record_formation_experiment.sh
+scripts/record_formation_experiment.py
+scripts/export_initialization_bag.py
+scripts/export_formation_bag.py
+scripts/plot_initialization_experiment.py
+scripts/plot_formation_experiment.py
+scripts/run_two_robot_experiment.py
+scripts/run_two_robot_adaptive_mission.py
+scripts/run_five_robot_tree_experiment.py
+```
+
+The old three-robot runners and old one-off relaxation scripts are retained only
+as historical/debug material unless explicitly ported to the current pool
+frame.
+
+## Environments
+
+For ROS-aware scripts such as bag exporters:
 
 ```bash
 cd ~/discower_ws/src/brov2_formation_control
 source setup_ros2.sh
+source ~/discower_ws/install/setup.bash
 ```
 
-The main offline tools are:
+The standard mission plotter is ROS-independent once the NPZ has been exported
+and can normally be run through the core environment:
 
-```text
-scripts/record_formation_experiment.sh
-scripts/export_formation_bag.py
-scripts/plot_formation_experiment.py
-scripts/run_two_robot_experiment.py
-scripts/run_three_robot_experiment.py
+```bash
+uv run python scripts/plot_formation_experiment.py ...
 ```
+
+The initialization exporter needs ROS because it reads rosbag/PX4 messages.
 
 ## Rebuild policy
 
-A rebuild is required after changing:
+A ROS rebuild is required after changing:
 
-- ROS nodes under `ros2/formation_control_ros/formation_control_ros/`;
+- nodes under `ros2/formation_control_ros/formation_control_ros/`;
 - launch files under `ros2/formation_control_ros/launch/`;
-- installed Python package/core files used through the ROS package.
+- installed Python/core code imported by the ROS nodes.
 
 A rebuild is not required after changing standalone scripts under `scripts/`,
-although the environment still needs to be sourced.
+although the correct environment still needs to be sourced.
