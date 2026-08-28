@@ -1,298 +1,200 @@
-# ROS experiment logging and paper-plot pipeline
+# ROS experiment logging and plot pipeline
 
-This patch makes ROS/SITL/hardware runs feed the **same BlueROV2 diagnostic
-plotters** already used by `examples/04_bluerov2_fov_clf_qp.py`.
+The current workflow records **initialization and the actual mission as two
+separate bags** while preserving the same controller diagnostic snapshot used
+for the rich BlueROV2 plots.
+
+## 1. Data flow
 
 ```text
-already-computed core controller evaluation
-             |
-             v
-versioned diagnostic snapshot (ROS-independent schema)
-             |
-             v
-/<robot>/formation_control/diagnostic_snapshot
-             |
-             +------------------------+
-             |                        |
-        PX4 odometry             PX4 setpoints
-             |                        |
-             +-----------+------------+
-                         v
-                     ros2 bag
-                         |
-                         v
-             export_formation_bag.py
-                         |
-                         v
-                formation_history.npz
-                         |
-                         v
-             plot_formation_experiment.py
-                         |
-                         v
-        existing example-04 plot functions
+controllers + PX4
+      |
+      +--> /formation_control/experiment_phase
+      +--> /formation_control/mission_status
+      +--> /<robot>/formation_control/diagnostic_snapshot
+      +--> PX4 odometry / setpoints / control mode
+      |
+      v
+split recorder
+      |
+      +--> initialization/bag
+      |       |
+      |       +--> export_initialization_bag.py
+      |       +--> initialization_history.npz
+      |       +--> plot_initialization_experiment.py
+      |
+      +--> mission/bag
+              |
+              +--> export_formation_bag.py
+              +--> formation_history.npz
+              +--> plot_formation_experiment.py
 ```
 
-The core package stays ROS-independent. The ROS package only serializes and
-publishes the snapshot.
+## 2. Split semantics
 
-## 1. What is logged
+Start the recorder **before arming**.
 
-The snapshot contains everything required to reconstruct the histories used by
-the rich BlueROV2 simulation plots:
+- `initialization/bag` starts immediately;
+- it closes when `/formation_control/experiment_phase` becomes `FORMATION`;
+- the runner publishes `mission_status = RUNNING` after phase/subscriber checks;
+- the runner waits one second so the mission recorder can open;
+- `mission/bag` contains the actual scripted mission;
+- it closes on `COMPLETE` or `ABORTED`.
 
-- controller evaluation time and fallback state;
-- CLF-QP slack, actuator-required slack and zero-slack actuation margin;
-- maximum T200 utilization, all eight thruster forces, force limits and body
-  wrench;
-- conservative and physical sensing-constraint values;
-- normalized adaptive state `s` and `s_dot` for collision/range/horizontal-FoV/
-  vertical-FoV channels;
-- normalized image coordinates `(alpha_h, alpha_v)`;
-- current and desired parent-minus-follower relative position;
-- distance/FoV domain parameters and enabled-constraint flags;
-- camera half angles and camera-to-body extrinsics;
-- full physical-CLF decomposition used by `CLFDiagnosticHistory`;
-- generalized velocity, desired virtual velocity, filtered command and command
-  derivative;
-- leader position/velocity/acceleration/quaternion reference when provided.
+If `FORMATION` is never reached, interrupting the recorder still closes and
+preserves the initialization bag.
 
-PX4 odometry, thrust/torque setpoints and vehicle-control mode are also kept in
-the rosbag. The exporter converts PX4 NED/FRD odometry back to the core
-NWU/FLU convention before writing the portable NPZ.
+## 3. Run-directory layout
 
-## 2. One integration hook is required in the current ROS runtime
-
-The archive can add the schema, publisher and scripts directly, but the exact
-current `FollowerController` / `LeaderController` source was not part of the
-attached repository snapshot. Add the publisher where each node already owns
-its successful core evaluation. **Do not evaluate the controller a second time
-for logging.**
-
-Create the publisher once in each node:
-
-```python
-from formation_control_ros.snapshot_publisher import DiagnosticSnapshotPublisher
-
-self._diagnostic_snapshot = DiagnosticSnapshotPublisher(self)
+```text
+outputs/experiments/<timestamp>_<name>/
+├── run_manifest.yaml
+├── initialization/
+│   ├── bag/
+│   ├── initialization_history.npz
+│   └── plots/
+└── mission/
+    ├── bag/
+    ├── formation_history.npz
+    └── plots/
 ```
 
-For a follower, call the ROS-independent extractor at the point where the core
-runtime already has `evaluation`, sensing kinematics and the relaxation result:
+The recorder and exporters print the absolute output path after saving.
 
-```python
-from formation_control.experiment import follower_snapshot_values
+## 4. What is recorded
 
-values = follower_snapshot_values(
-    model=model,
-    allocation=allocation,
-    camera=camera,
-    follower_state=follower_state,
-    parent_position=parent_position,
-    parent_velocity_inertial=parent_velocity_inertial,
-    desired_relative_position=desired_relative_position,
-    evaluation=evaluation,
-    conservative_values=kinematics.values,
-    relaxation_state=relaxation_state,        # normalized s, not rho
-    relaxation_rate=relaxation_rate,          # normalized s_dot
-    controller_time_s=controller_time_s,
-    fallback=False,
-    distance_domain=distance_domain,
-    fov_domain=fov_domain,
-    constraints_enabled=np.array(
-        [distance_constraints, distance_constraints,
-         fov_constraints, fov_constraints],
-        dtype=bool,
-    ),
-    adaptive_enabled=adaptive,
-    domain_margin_ratio=relaxation_policy.domain_margin_ratio,
-)
-self._diagnostic_snapshot.publish(values)
-```
+For every robot the recorder includes PX4 odometry, control mode, thrust/torque
+setpoints, `cmd_vel`, the atomic controller diagnostic snapshot and the
+human-readable sensing/workspace diagnostic topics.
 
-On fallback, still publish one snapshot with at least:
+The diagnostic snapshot contains, as available:
 
-```python
-self._diagnostic_snapshot.publish(
-    {
-        "role": 0.0,
-        "fallback": 1.0,
-        "controller_time_s": controller_time_s,
-    }
-)
-```
+- controller time and fallback state;
+- CLF slack, required zero-slack actuation slack and actuation margin;
+- all eight thruster forces, limits, utilization and body wrench;
+- sensing conservative/physical margins;
+- sensing relaxation state/rate;
+- normalized image coordinates;
+- desired/actual relative quantities;
+- CLF/backstepping decomposition;
+- workspace relaxation and physical margins;
+- leader reference quantities.
 
-For the leader, publish its actual optimized eight-thruster command and the
-reference used by the leader controller:
+The mission exporter converts PX4 NED/FRD odometry to the controller's core
+NWU/FLU convention. The pool re-anchoring does not change this conversion.
 
-```python
-from formation_control.experiment import leader_snapshot_values
+## 5. Record
 
-values = leader_snapshot_values(
-    thruster_forces=thruster_forces,
-    body_wrench=body_wrench,
-    controller_time_s=controller_time_s,
-    fallback=fallback,
-    allocation=allocation,
-    reference_position=p_r,
-    reference_velocity=v_r,
-    reference_acceleration=a_r,
-    reference_quaternion=q_r,
-)
-self._diagnostic_snapshot.publish(values)
-```
-
-If the leader runtime already exposes its CLF internals, pass them through
-`extra_values` using the schema field names. This is optional for the current
-paper plots; position/velocity reference logging is enough for the leader RMS
-tracking figure.
-
-The publisher uses `std_msgs/msg/Float64MultiArray`. Ensure `std_msgs` is a
-runtime dependency in `ros2/formation_control_ros/package.xml` if it is not
-already present.
-
-## 3. Record an experiment
-
-Source the ROS environment first, then run:
+Two-robot hardware-like example:
 
 ```bash
 scripts/record_formation_experiment.sh \
-  --name two_robot_1p8 \
-  --robots itrl_rov_1,itrl_rov_3 \
-  --edge itrl_rov_3:itrl_rov_1
+  --name two_robot_01 \
+  --robots splash,glub \
+  --edge glub:splash
 ```
 
-The run is written under:
-
-```text
-outputs/experiments/YYYYMMDD_HHMMSS_two_robot_1p8/
-├── run_manifest.yaml
-└── bag/
-```
-
-`Ctrl-C` stops rosbag cleanly. For a larger rooted tree, repeat `--edge` once
-per follower-parent edge and list all robot namespaces in `--robots`.
-
-## 4. Export the bag to a portable NPZ
-
-The bag reader needs the ROS Python environment:
+Five-robot tree:
 
 ```bash
-source setup_ros2.sh
-python scripts/export_formation_bag.py \
-  outputs/experiments/<run>
+scripts/record_formation_experiment.sh \
+  --name five_tree_01 \
+  --robots itrl_rov_1,itrl_rov_2,itrl_rov_3,itrl_rov_4,itrl_rov_5 \
+  --edge itrl_rov_2:itrl_rov_1 \
+  --edge itrl_rov_3:itrl_rov_1 \
+  --edge itrl_rov_4:itrl_rov_2 \
+  --edge itrl_rov_5:itrl_rov_3
 ```
 
-This creates:
+Use `--no-postprocess` to record only.
 
-```text
-outputs/experiments/<run>/formation_history.npz
-```
+## 6. Initialization export and plots
 
-The exporter synchronizes all robot odometry and follower snapshots to a common
-controller grid (30 ms nearest-neighbor tolerance by default). Use
-`--max-sync-ms` to change it.
-
-## 5. Generate the paper plots
-
-The plotting stage is ROS-independent and should normally be run through the
-core `uv` environment.
-
-Paper-oriented preset:
+The initialization exporter is deliberately tolerant of startup failures. It
+requires synchronized PX4 odometry; controller snapshots are decoded when
+available but are not required for the export to exist.
 
 ```bash
+RUN=$(ls -dt outputs/experiments/* | head -n 1)
+
+python scripts/export_initialization_bag.py "$RUN"
+python scripts/plot_initialization_experiment.py \
+  "$RUN/initialization/initialization_history.npz" \
+  --save
+```
+
+The initialization plotter produces:
+
+- per-robot position histories and reference overlays when the corresponding
+  reference is present in the logged snapshot;
+- position-error/speed convergence where the reference is available;
+- workspace physical margins and relaxation states;
+- thruster utilization / required slack / armed / Offboard status.
+
+The default plotted phase-manager thresholds are `0.65 m` position error and
+`0.08 m/s` speed; override the plotter arguments if a launch uses different
+values.
+
+## 7. Mission export and paper plots
+
+```bash
+python scripts/export_formation_bag.py "$RUN" --phase mission
+
 uv run python scripts/plot_formation_experiment.py \
-  outputs/experiments/<run>/formation_history.npz \
+  "$RUN/mission/formation_history.npz" \
   --paper --paper-quality --save
 ```
 
-All diagnostics that existed in the rich BlueROV2 simulation:
+The mission exporter still supports legacy runs containing `<run>/bag`. If no
+`--phase` is provided, it uses a legacy bag when present, otherwise it defaults
+to the split `mission` bag.
 
-```bash
-uv run python scripts/plot_formation_experiment.py \
-  outputs/experiments/<run>/formation_history.npz \
-  --all --save
+Useful plot selectors include:
+
+```text
+--trajectory
+--leader-tracking
+--leader-position
+--formation-error
+--formation-tracking
+--workspace
+--workspace-relaxation
+--distance
+--fov
+--adaptive-fov
+--slack
+--actuation
+--domain
+--relaxation-rates
+--thrusters
+--controller-time
+--clf-value
+--clf-balance
+--clf-drift
+--backstepping
+--peak-debug
+--paper
+--all
 ```
 
-A selected subset:
+Legends on compact formation/sensing paper plots are hidden by default; use
+`--show-legends` when needed.
+
+## 8. Animations
+
+Mission histories can also generate the 3-D formation animation and diagnostic
+animations:
 
 ```bash
 uv run python scripts/plot_formation_experiment.py \
-  outputs/experiments/<run>/formation_history.npz \
-  --trajectory --leader-tracking --distance --fov \
-  --adaptive-fov --thrusters --controller-time \
-  --paper-quality --save --show
-```
-
-Available plot selectors:
-
-- `--trajectory`: 3-D formation trajectory, BlueROV geometry, sensing graph and
-  edge-quality coloring;
-- `--leader-tracking`: leader position/velocity tracking errors;
-- `--distance`: old inter-agent distance/adaptive-boundary plot;
-- `--fov`: old horizontal + vertical FoV plots;
-- `--adaptive-fov`: publication-style representative FoV/domain-relaxation
-  two-panel plot;
-- `--slack`: optimal CLF slack and actuator-required slack;
-- `--actuation`: zero-slack CLF actuation margin;
-- `--domain`: old four-channel domain enlargement plot;
-- `--relaxation-rates`: old auxiliary funnel-rate plot;
-- `--thrusters`: old eight-T200 force plot;
-- `--controller-time`: old controller-time plot;
-- `--clf-value`: old `W` and `alpha(W)` plot;
-- `--clf-balance`: old hard-CLF feasibility balance;
-- `--clf-drift`: old CLF drift decomposition;
-- `--backstepping`: old velocity-backstepping decomposition;
-- `--peak-debug`: all four old peak-detail diagnostic figures;
-- `--paper`: paper-oriented preset;
-- `--all`: every plot above.
-
-Use `--format pdf|png|svg`, `--output-dir PATH`, `--save`, and `--show` as
-needed. With multiple followers, `--observer ROBOT_NAMESPACE` chooses the edge
-used for the representative `--adaptive-fov` figure.
-
-## 6. Why the plotting script imports example 04
-
-This first version deliberately loads `examples/04_bluerov2_fov_clf_qp.py` and
-calls its existing plotting functions. That guarantees that simulation and ROS
-runs do not silently diverge into two plotting implementations.
-
-After this pipeline has been validated on a few bags, the clean follow-up
-refactor is to move `CLFDiagnosticHistory` and the reusable diagnostic plot
-functions from example 04 into
-`src/formation_control/visualization/bluerov2_diagnostics.py`. Then both the
-simulation example and ROS experiment plotter can import that module directly;
-the snapshot and NPZ formats do not need to change.
-
-
-## Current paper and animation commands
-
-Paper figures:
-
-```bash
-uv run python scripts/plot_formation_experiment.py \
-  "$RUN/formation_history.npz" \
-  --paper \
-  --paper-quality \
-  --save \
-  --format pdf
-```
-
-The distance and horizontal/vertical FoV paper plots use one color per sensing
-edge. Measured quantities are solid, adaptive bounds for the same edge are
-dashed, and physical/conservative limits use distinct line styles.
-
-Formation animation:
-
-```bash
-uv run python scripts/plot_formation_experiment.py \
-  "$RUN/formation_history.npz" \
-  --animation \
-  --save \
+  "$RUN/mission/formation_history.npz" \
+  --animation --diagnostic-animations \
   --animation-format mp4 \
-  --frame-stride 2
+  --save
 ```
 
-The animation reconstructs the time-varying desired absolute positions along
-the directed tree and renders them as subdued dashed/wireframe reference
-vehicles alongside the measured formation.
+## 9. Important operational rule
+
+Do not manually restart recording at the `INITIALIZE -> FORMATION` transition.
+The split recorder is designed to make the boundary deterministic while the
+operator concentrates on QGC, arming and the physical robots.

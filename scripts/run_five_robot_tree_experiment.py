@@ -28,7 +28,6 @@ import time
 import rclpy
 from geometry_msgs.msg import Twist
 from rclpy.node import Node
-from rclpy.parameter import Parameter
 from rclpy.qos import (
     DurabilityPolicy,
     HistoryPolicy,
@@ -37,26 +36,16 @@ from rclpy.qos import (
 )
 from std_msgs.msg import String
 
+
 PHASE_TOPIC = "/formation_control/experiment_phase"
 FORMATION_TOPIC = "/formation_control/desired_formation"
+MISSION_STATUS_TOPIC = "/formation_control/mission_status"
 
 
 class FiveRobotExperimentRunner(Node):
-    def __init__(
-        self,
-        leader: str,
-        expected_followers: int = 4,
-        *,
-        gazebo_timer: bool = False,
-    ) -> None:
-        super().__init__(
-            "five_robot_experiment_runner",
-            parameter_overrides=[
-                Parameter("use_sim_time", value=bool(gazebo_timer)),
-            ],
-        )
+    def __init__(self, leader: str, expected_followers: int = 4) -> None:
+        super().__init__("five_robot_experiment_runner")
         self.expected_followers = int(expected_followers)
-        self.gazebo_timer = bool(gazebo_timer)
 
         formation_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -82,6 +71,11 @@ class FiveRobotExperimentRunner(Node):
             FORMATION_TOPIC,
             formation_qos,
         )
+        self.mission_status_pub = self.create_publisher(
+            String,
+            MISSION_STATUS_TOPIC,
+            phase_qos,
+        )
         self.cmd_vel_topic = f"/{leader}/formation_control/cmd_vel"
         self.cmd_vel_pub = self.create_publisher(
             Twist,
@@ -97,21 +91,19 @@ class FiveRobotExperimentRunner(Node):
             phase_qos,
         )
 
-        clock_source = "Gazebo simulation time" if self.gazebo_timer else "wall time"
-        self.get_logger().info(f"Experiment mission timer uses {clock_source}.")
+    def publish_mission_status(self, status: str) -> None:
+        message = String()
+        message.data = status.strip().upper()
+        self.mission_status_pub.publish(message)
+        self.get_logger().info(f"MISSION_STATUS {message.data}")
 
     def _phase_callback(self, message: String) -> None:
         self.phase = message.data.strip().upper()
 
-    def _now_seconds(self) -> float:
-        if self.gazebo_timer:
-            return 1e-9 * float(self.get_clock().now().nanoseconds)
-        return time.monotonic()
-
     def _spin_sleep(self, duration: float) -> None:
-        deadline = self._now_seconds() + duration
-        while rclpy.ok() and self._now_seconds() < deadline:
-            remaining = deadline - self._now_seconds()
+        deadline = time.monotonic() + duration
+        while rclpy.ok() and time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
             rclpy.spin_once(self, timeout_sec=min(0.05, remaining))
 
     def wait_for_phase(self, desired: str) -> None:
@@ -169,11 +161,11 @@ class FiveRobotExperimentRunner(Node):
         message = String()
         message.data = name
         period = 1.0 / rate_hz
-        deadline = self._now_seconds() + duration
-        while rclpy.ok() and self._now_seconds() < deadline:
+        deadline = time.monotonic() + duration
+        while rclpy.ok() and time.monotonic() < deadline:
             self.formation_pub.publish(message)
             rclpy.spin_once(self, timeout_sec=0.0)
-            self._spin_sleep(period)
+            time.sleep(period)
 
     def stop_leader(self) -> None:
         message = Twist()
@@ -182,7 +174,7 @@ class FiveRobotExperimentRunner(Node):
                 return
             self.cmd_vel_pub.publish(message)
             rclpy.spin_once(self, timeout_sec=0.0)
-            self._spin_sleep(0.05)
+            time.sleep(0.05)
 
     def publish_velocity(
         self,
@@ -208,11 +200,11 @@ class FiveRobotExperimentRunner(Node):
         message.linear.z = float(vz)
 
         period = 1.0 / rate_hz
-        deadline = self._now_seconds() + duration
-        while rclpy.ok() and self._now_seconds() < deadline:
+        deadline = time.monotonic() + duration
+        while rclpy.ok() and time.monotonic() < deadline:
             self.cmd_vel_pub.publish(message)
             rclpy.spin_once(self, timeout_sec=0.0)
-            self._spin_sleep(period)
+            time.sleep(period)
 
         self.stop_leader()
 
@@ -284,22 +276,18 @@ class FiveRobotExperimentRunner(Node):
         self.publish_velocity(0.18, 0.0, 0.0, duration=3.5)
         self.settle(10.0)
 
-        # Return to the centered leader reference while the compact formation
-        # still provides ample workspace margin.  Expanding to tree_staggered
-        # at the translated reference would place robot 4 at approximately
-        # x=0.63 m, outside the conservative reference upper bound of 0.625 m
-        # (the 0.675 m conservative wall minus the 0.05 m reference margin).
-        self.publish_velocity(-0.18, 0.0, 0.0, duration=3.5)
-        self.settle(10.0)
-
-        # Undo y before restoring the larger tree footprint.
-        self.publish_velocity(0.0, -0.25, 0.0, duration=4.0)
-        self.settle(10.0)
-
         self.publish_formation("tree_staggered")
         self.settle(12.0)
 
+        # Undo y while keeping the depth-two tree.
+        self.publish_velocity(0.0, -0.25, 0.0, duration=4.0)
+        self.settle(10.0)
+
         self.publish_formation("tree_nominal")
+        self.settle(10.0)
+
+        # Undo x.
+        self.publish_velocity(-0.18, 0.0, 0.0, duration=3.5)
         self.settle(12.0)
 
         self.stop_leader()
@@ -308,13 +296,14 @@ class FiveRobotExperimentRunner(Node):
         )
 
     def run_challenging(self) -> None:
-        """Execute large, collision-aware three-dimensional tree changes.
+        """Stress moving-leader tracking and sensing-domain adaptation.
 
-        The two branches are separated in depth before robots exchange sides.
-        The subsequent crossed, opposed, and parallel geometries command
-        approximately 2.3--2.7 m displacements for different tree levels.
-        All steady references remain inside the conservative tank workspace
-        and all edge lengths remain inside the conservative sensing domain.
+        The first pulse starts from ``tree_wide`` and moves the leader in -y,
+        away from its first-level followers. If those followers were
+        momentarily stationary, the approximately 1 m pulse would increase the
+        first-level distance from about 2.24 m to about 3.16 m: beyond the
+        conservative 3.0 m range but still below the physical 3.6 m range.
+        The actual closed-loop excursion is smaller because the followers move.
         """
         self.get_logger().info(
             "=== CHALLENGING FIVE-ROBOT TREE EXPERIMENT START ==="
@@ -323,35 +312,42 @@ class FiveRobotExperimentRunner(Node):
         self.publish_formation("tree_nominal")
         self.settle(6.0)
 
-        # Establish 0.8--1.3 m depth separation before any lateral crossing.
-        self.publish_formation("tree_depth_split")
+        # Preload the first-level edges with the wide geometry.
+        self.publish_formation("tree_wide")
         self.settle(10.0)
 
-        # The leaves exchange sides by about 2.6 m, producing an X-shaped tree.
-        self.publish_formation("tree_crossed_3d")
-        self.settle(16.0)
+        # Main sensing-domain stress event: about -1.0 m in y.
+        self.publish_velocity(0.0, -0.40, 0.0, duration=2.5)
+        self.settle(10.0)
 
-        # The first-level followers now exchange sides by about 2.3 m while
-        # the leaves remain near the tank sides, yielding two opposed columns.
-        self.publish_formation("tree_opposed_3d")
-        self.settle(16.0)
+        # Contract before a large diagonal translation.
+        self.publish_formation("tree_compact")
+        self.settle(8.0)
 
-        # All four followers move roughly 2.6 m into two parallel, depth-
-        # separated branches near the far end of the tank.
-        self.publish_formation("tree_parallel_3d")
-        self.settle(18.0)
+        # About (+1.0, +1.2) m.
+        self.publish_velocity(0.25, 0.30, 0.0, duration=4.0)
+        self.settle(10.0)
 
-        # Re-form the crossed X from the opposite side of the workspace.
-        self.publish_formation("tree_crossed_3d")
-        self.settle(16.0)
+        # Undo x while compact, before expanding the footprint again.
+        self.publish_velocity(-0.25, 0.0, 0.0, duration=4.0)
+        self.settle(8.0)
 
-        # Restore the uncrossed lateral ordering while retaining depth
-        # separation, then close the depth layers only after paths are clear.
-        self.publish_formation("tree_depth_split")
-        self.settle(14.0)
+        self.publish_formation("tree_staggered")
+        self.settle(10.0)
+
+        # Mild 3-D excitation.
+        self.publish_velocity(0.0, 0.0, 0.10, duration=2.0)
+        self.settle(8.0)
+
+        self.publish_velocity(0.0, 0.0, -0.10, duration=2.0)
+        self.settle(8.0)
+
+        # Remove the remaining approximately +0.2 m net y displacement.
+        self.publish_velocity(0.0, -0.10, 0.0, duration=2.0)
+        self.settle(8.0)
 
         self.publish_formation("tree_nominal")
-        self.settle(14.0)
+        self.settle(12.0)
 
         self.stop_leader()
         self.get_logger().info(
@@ -367,23 +363,20 @@ def main() -> None:
         choices=("cautious", "full", "challenging"),
         default="cautious",
     )
-    parser.add_argument(
-        "--gazebo-timer",
-        "--gazebo_timer",
-        action="store_true",
-        help="time all mission phases from Gazebo /clock instead of wall time",
-    )
     args = parser.parse_args()
 
     rclpy.init()
-    node = FiveRobotExperimentRunner(
-        args.leader,
-        gazebo_timer=args.gazebo_timer,
-    )
+    node = FiveRobotExperimentRunner(args.leader)
+    node.publish_mission_status("WAITING")
 
     try:
         node.wait_for_phase("FORMATION")
         node.wait_for_subscribers()
+
+        node.publish_mission_status("RUNNING")
+        # Give the split recorder time to open RUN/mission/bag before the
+        # first formation or velocity command is sent.
+        node._spin_sleep(1.0)
 
         if args.profile == "cautious":
             node.run_cautious()
@@ -391,12 +384,16 @@ def main() -> None:
             node.run_full()
         else:
             node.run_challenging()
+
+        node.publish_mission_status("COMPLETE")
     except KeyboardInterrupt:
+        node.publish_mission_status("ABORTED")
         node.get_logger().warn(
             "Experiment interrupted; commanding zero leader velocity."
         )
         node.stop_leader()
     except Exception as error:
+        node.publish_mission_status("ABORTED")
         node.get_logger().error(f"Experiment aborted: {error}")
         node.stop_leader()
         raise

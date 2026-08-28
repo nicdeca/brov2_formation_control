@@ -190,12 +190,15 @@ class FunnelRelaxationPolicy:
         *,
         enabled: FloatArray,
     ) -> tuple[FloatArray, FloatArray]:
-        """Emergency initialization/roundoff repair for the logarithmic domain.
+        """Emergency sampled-data repair of the residual barrier domain.
 
-        This is not part of the nominal adaptation law.  If an adaptive
-        constraint has already reached the numerical logarithm floor, increase
-        ``s`` just enough to restore the prescribed positive margin.  No upper
-        clipping is applied.
+        This is not part of the nominal adaptation law. If a sampled
+        measurement has already crossed the numerical residual boundary
+
+            y = h_c + rho_max s - h_margin > 0,
+
+        increase ``s`` only enough to restore
+        ``y = minimum_constraint_margin``. No upper clipping is applied.
         """
         state = self.validate_state(state)
         base = _vector4(conservative_values, name="conservative_values")
@@ -206,23 +209,176 @@ class FunnelRelaxationPolicy:
         projected = state.copy()
         correction = np.zeros(4, dtype=float)
         margin = self.domain_margin
+        residual_floor = self.minimum_constraint_margin
 
         for index in range(4):
             if not active[index]:
                 continue
+
             maximum = self.maximum_enlargement[index]
             adaptive_value = base[index] + maximum * projected[index]
-            if adaptive_value > self.minimum_constraint_margin:
+            residual = adaptive_value - margin[index]
+            if residual > residual_floor:
                 continue
+
             if maximum <= 0.0:
                 raise FunnelRelaxationInfeasibleError(
                     f"{FUNNEL_CHANNELS[index]} has no relaxation reserve."
                 )
-            required_state = max(0.0, (margin[index] - base[index]) / maximum)
-            correction[index] = max(0.0, required_state - projected[index])
+
+            required_state = max(
+                0.0,
+                (margin[index] + residual_floor - base[index]) / maximum,
+            )
+            correction[index] = max(
+                0.0,
+                required_state - projected[index],
+            )
             projected[index] = max(projected[index], required_state)
 
         return projected, correction
+
+    def advance(
+        self,
+        state: FloatArray,
+        *,
+        conservative_values: FloatArray,
+        enabled: FloatArray,
+        sample_time: float,
+    ) -> tuple[FloatArray, FloatArray]:
+        """Advance the auxiliary states with an implicit sampled-data step.
+
+        The continuous law is unchanged. For every enabled channel, this solves
+
+            s_{k+1} = s_k + dt * f(s_{k+1}; h_{c,k})
+
+        with the current sampled ``h_c`` held fixed. This avoids the large
+        one-step overshoot that explicit Euler can produce close to the
+        singular residual boundary. The returned rate is the effective
+        sampled-data rate ``(s_{k+1} - s_k) / dt``.
+        """
+        if not np.isfinite(sample_time) or sample_time <= 0.0:
+            raise ValueError("sample_time must be finite and positive.")
+
+        base = _vector4(conservative_values, name="conservative_values")
+        active = np.asarray(enabled, dtype=bool)
+        if active.shape != (4,):
+            raise ValueError("enabled must have shape (4,).")
+
+        state, _ = self.project_to_current_domain(
+            state,
+            base,
+            enabled=active,
+        )
+        next_state = state.copy()
+
+        margin = self.domain_margin
+        y_on = self.activation_on_margin
+        y_off = self.activation_off_margin
+        residual_floor = self.minimum_constraint_margin
+
+        for index in range(4):
+            if not active[index]:
+                continue
+
+            maximum = float(self.maximum_enlargement[index])
+            if maximum <= 0.0:
+                continue
+
+            recovery = float(self.recovery_gain[index])
+            barrier = float(self.barrier_gain[index])
+            old_state = float(state[index])
+
+            if barrier <= 0.0:
+                candidate = old_state / (1.0 + sample_time * recovery)
+                minimum_state = max(
+                    0.0,
+                    (
+                        float(margin[index])
+                        + residual_floor
+                        - float(base[index])
+                    )
+                    / maximum,
+                )
+                next_state[index] = max(candidate, minimum_state)
+                continue
+
+            def equation(candidate: float) -> float:
+                y = (
+                    float(base[index])
+                    + maximum * candidate
+                    - float(margin[index])
+                )
+                y_safe = max(y, residual_floor)
+                sigma = self._smoothstep_activation(
+                    y_safe,
+                    float(y_on[index]),
+                    float(y_off[index]),
+                )
+                barrier_rate = barrier * sigma * maximum / y_safe
+                return (
+                    (1.0 + sample_time * recovery) * candidate
+                    - old_state
+                    - sample_time * barrier_rate
+                )
+
+            lower = max(
+                0.0,
+                (
+                    float(margin[index])
+                    + residual_floor
+                    - float(base[index])
+                )
+                / maximum,
+            )
+
+            activation_off_state = max(
+                0.0,
+                (
+                    float(margin[index])
+                    + float(y_off[index])
+                    - float(base[index])
+                )
+                / maximum,
+            )
+            recovery_state = old_state / (1.0 + sample_time * recovery)
+            upper = max(
+                lower + 1.0,
+                activation_off_state,
+                recovery_state,
+            )
+
+            f_lower = equation(lower)
+            f_upper = equation(upper)
+
+            if f_lower >= 0.0:
+                next_state[index] = lower
+                continue
+
+            if f_upper < 0.0:
+                for _ in range(32):
+                    upper = max(2.0 * upper, upper + 1.0)
+                    f_upper = equation(upper)
+                    if f_upper >= 0.0:
+                        break
+                else:
+                    raise RuntimeError(
+                        "could not bracket implicit funnel-relaxation step "
+                        f"for channel {FUNNEL_CHANNELS[index]}."
+                    )
+
+            for _ in range(60):
+                middle = 0.5 * (lower + upper)
+                if equation(middle) <= 0.0:
+                    lower = middle
+                else:
+                    upper = middle
+
+            next_state[index] = 0.5 * (lower + upper)
+
+        next_state = self.validate_state(next_state)
+        effective_rate = (next_state - state) / sample_time
+        return next_state, effective_rate
 
     def evaluate(
         self,

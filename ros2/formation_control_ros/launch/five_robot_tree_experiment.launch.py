@@ -27,7 +27,7 @@ PHASE_TOPIC = "/formation_control/experiment_phase"
 FORMATION_TOPIC = "/formation_control/desired_formation"
 
 # ---------------------------------------------------------------------------
-# Initial absolute positions, core NWU.
+# Initial absolute positions, pool-aligned core NWU.
 #
 #                 1
 #              /     \
@@ -37,17 +37,17 @@ FORMATION_TOPIC = "/formation_control/desired_formation"
 #
 # The two branches are symmetric about the leader.
 # ---------------------------------------------------------------------------
-INITIAL_LEADER_POSITION = [-1.20, 1.15, -95.20]
-INITIAL_ROBOT_2_POSITION = [-0.50, 2.80, -95.20]
-INITIAL_ROBOT_3_POSITION = [-1.90, 2.80, -95.20]
-INITIAL_ROBOT_4_POSITION = [0.00, 4.25, -95.20]
-INITIAL_ROBOT_5_POSITION = [-2.40, 4.25, -95.20]
+INITIAL_LEADER_POSITION = [2.675, 0.050, -0.775]
+INITIAL_ROBOT_2_POSITION = [4.325, -0.650, -0.775]
+INITIAL_ROBOT_3_POSITION = [4.325, 0.750, -0.775]
+INITIAL_ROBOT_4_POSITION = [5.775, -1.150, -0.775]
+INITIAL_ROBOT_5_POSITION = [5.775, 1.250, -0.775]
 
 # Desired parent-minus-follower vectors for the nominal tree.
-INITIAL_D21 = [-0.70, -1.65, 0.00]
-INITIAL_D31 = [0.70, -1.65, 0.00]
-INITIAL_D42 = [-0.50, -1.45, 0.00]
-INITIAL_D53 = [0.50, -1.45, 0.00]
+INITIAL_D21 = [-1.650, 0.700, 0.000]
+INITIAL_D31 = [-1.650, -0.700, 0.000]
+INITIAL_D42 = [-1.450, 0.500, 0.000]
+INITIAL_D53 = [-1.450, -0.500, 0.000]
 
 FORMATION_NAMES = [
     "tree_nominal",
@@ -60,7 +60,7 @@ FORMATION_NAMES = [
     "tree_parallel_3d",
 ]
 
-# Per-edge parent-minus-follower vectors in core NWU.
+# Per-edge parent-minus-follower vectors in pool-aligned core NWU.
 #
 # tree_nominal:
 #   symmetric depth-two tree.
@@ -77,130 +77,55 @@ FORMATION_NAMES = [
 #   level offsets oppose the first level, so z displacement does not accumulate
 #   at the leaf robots.
 #
-# The four formations below are reserved for the challenging profile. Their
-# absolute references at the initial leader position are:
-#
-#                     robot 2                 robot 3
-# depth_split   (-0.50, 2.80, -95.65)  (-1.90, 2.80, -94.85)
-# crossed_3d    (-0.25, 2.45, -95.65)  (-2.15, 2.45, -94.85)
-# opposed_3d    (-2.55, 2.30, -95.65)  ( 0.15, 2.30, -94.85)
-# parallel_3d   (-0.10, 3.40, -95.80)  (-2.30, 3.40, -94.85)
-#
-#                     robot 4                 robot 5
-# depth_split   ( 0.00, 4.25, -96.05)  (-2.40, 4.25, -94.85)
-# crossed_3d    (-2.55, 4.05, -96.05)  ( 0.15, 4.05, -94.85)
-# opposed_3d    (-2.60, 4.60, -96.00)  ( 0.20, 4.60, -94.85)
-# parallel_3d   (-0.10, 5.20, -95.80)  (-2.30, 5.20, -94.85)
+# The four formations below are reserved for the challenging profile.
+# All vectors have been rigidly rotated into the pool-aligned core NWU frame;
+# their distances and relative 3-D geometry are unchanged.
 #
 # ``tree_depth_split`` establishes vertical separation before either pair of
 # robots exchanges lateral sides. This keeps even the unconnected robot pairs
 # separated during the large crossed transitions.
 D21_FORMATIONS = [
-    -0.70,
-    -1.65,
-    0.00,
-    -0.80,
-    -1.95,
-    0.00,
-    -0.50,
-    -1.30,
-    0.00,
-    -0.70,
-    -1.65,
-    0.10,
-    -0.70,
-    -1.65,
-    0.45,
-    -0.95,
-    -1.30,
-    0.45,
-    1.35,
-    -1.15,
-    0.45,
-    -1.10,
-    -2.25,
-    0.60,
+    -1.65, 0.70, 0.00,
+    -1.95, 0.80, 0.00,
+    -1.30, 0.50, 0.00,
+    -1.65, 0.70, 0.10,
+    -1.65, 0.70, 0.55,
+    -1.30, 0.95, 0.55,
+    -1.15, -1.35, 0.55,
+    -2.25, 1.10, 0.70,
 ]
 
 D31_FORMATIONS = [
-    0.70,
-    -1.65,
-    0.00,
-    0.80,
-    -1.95,
-    0.00,
-    0.50,
-    -1.30,
-    0.00,
-    0.70,
-    -1.65,
-    -0.10,
-    0.70,
-    -1.65,
-    -0.35,
-    0.95,
-    -1.30,
-    -0.35,
-    -1.35,
-    -1.15,
-    -0.35,
-    1.10,
-    -2.25,
-    -0.35,
+    -1.65, -0.70, 0.00,
+    -1.95, -0.80, 0.00,
+    -1.30, -0.50, 0.00,
+    -1.65, -0.70, -0.10,
+    -1.65, -0.70, -0.35,
+    -1.30, -0.95, -0.35,
+    -1.15, 1.35, -0.35,
+    -2.25, -1.10, -0.35,
 ]
 
 D42_FORMATIONS = [
-    -0.50,
-    -1.45,
-    0.00,
-    -0.55,
-    -1.65,
-    0.00,
-    -0.35,
-    -1.10,
-    0.00,
-    -0.50,
-    -1.45,
-    -0.10,
-    -0.50,
-    -1.45,
-    0.40,
-    2.30,
-    -1.60,
-    0.40,
-    0.05,
-    -2.30,
-    0.35,
-    0.00,
-    -1.80,
-    0.00,
+    -1.45, 0.50, 0.00,
+    -1.65, 0.55, 0.00,
+    -1.10, 0.35, 0.00,
+    -1.45, 0.50, -0.10,
+    -1.45, 0.50, 0.40,
+    -1.60, -2.30, 0.40,
+    -2.30, -0.05, 0.35,
+    -1.80, -0.00, 0.00,
 ]
 
 D53_FORMATIONS = [
-    0.50,
-    -1.45,
-    0.00,
-    0.55,
-    -1.65,
-    0.00,
-    0.35,
-    -1.10,
-    0.00,
-    0.50,
-    -1.45,
-    0.10,
-    0.50,
-    -1.45,
-    0.00,
-    -2.30,
-    -1.60,
-    0.00,
-    -0.05,
-    -2.30,
-    0.00,
-    0.00,
-    -1.80,
-    0.00,
+    -1.45, -0.50, 0.00,
+    -1.65, -0.55, 0.00,
+    -1.10, -0.35, 0.00,
+    -1.45, -0.50, 0.10,
+    -1.45, -0.50, 0.00,
+    -1.60, 2.30, 0.00,
+    -2.30, 0.05, 0.00,
+    -1.80, -0.00, 0.00,
 ]
 
 
@@ -340,10 +265,10 @@ def generate_launch_description() -> LaunchDescription:
             workspace_adaptive,
             value_type=bool,
         ),
-        "workspace_physical_lower": [-3.125, -1.225, -96.58],
-        "workspace_physical_upper": [0.825, 5.575, -94.20],
-        "workspace_conservative_lower": [-2.975, -1.075, -96.38],
-        "workspace_conservative_upper": [0.675, 5.425, -94.75],
+        "workspace_physical_lower": [0.300, -1.975, -2.155],
+        "workspace_physical_upper": [7.100, 1.975, 0.225],
+        "workspace_conservative_lower": [0.450, -1.825, -1.955],
+        "workspace_conservative_upper": [6.950, 1.825, -0.325],
         "workspace_barrier_weight": 0.10,
         "workspace_reference_margin": 0.05,
         "workspace_relaxation_recovery_gain": 0.8,
