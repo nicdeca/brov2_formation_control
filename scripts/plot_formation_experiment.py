@@ -2129,6 +2129,7 @@ def _save_figures(
     figure_format: str,
     paper_quality: bool,
 ) -> None:
+    output_dir = output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     count = 0
     for name, figure in figures.items():
@@ -2146,6 +2147,7 @@ def _save_figures(
         )
         count += 1
     print(f"Saved {count} figure(s) to {output_dir}")
+    print(f"Absolute output folder: {output_dir}")
 
 
 def main() -> None:
@@ -2542,7 +2544,11 @@ def main() -> None:
         animation_dt = float(np.median(np.diff(control_times)))
 
     if args.save:
-        output_dir = args.output_dir or args.history.parent / "plots"
+        output_dir = (
+            args.output_dir.expanduser().resolve()
+            if args.output_dir is not None
+            else (args.history.expanduser().resolve().parent / "plots").resolve()
+        )
         _save_figures(
             figures,
             output_dir,

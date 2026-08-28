@@ -33,16 +33,18 @@ DEFAULT_PX4_DIR = _default_px4_dir()
 
 # Gazebo ENU poses: x,y,z,roll,pitch,yaw.
 #
-# The first three defaults put both followers on the camera-visible side of
-# robot 1.  They are deliberately close, but not identical, to the desired
-# experiment triangle so the INITIALIZE phase still performs a real maneuver.
+# The world has been re-anchored so that PX4 local NED uses the same pool
+# origin/orientation as the real Marinarium convention.  These poses are the
+# rigidly transformed versions of the previous validated spawn geometry.
+# The -90 deg Gazebo yaw preserves each vehicle's orientation relative to the
+# rotated tank.
 DEFAULT_POSES = [
-    "-1.15,-2.20,-95.70,0,0,0",  # itrl_rov_1
-    "-2.65,-1.55,-95.70,0,0,0",  # itrl_rov_2
-    "-3.25,-2.85,-95.70,0,0,0",  # itrl_rov_3
-    "-3.80,-1.20,-95.70,0,0,0",  # itrl_rov_4
-    "-4.25,-2.70,-95.70,0,0,0",  # itrl_rov_5
-    "-4.40,-2.35,-95.70,0,0,0",  # itrl_rov_6
+    "-1.050,2.675,-1.275,0,0,-1.57079632679",  # robot 1
+    "-0.400,4.175,-1.275,0,0,-1.57079632679",  # robot 2
+    "-1.700,4.775,-1.275,0,0,-1.57079632679",  # robot 3
+    "-0.050,5.325,-1.275,0,0,-1.57079632679",  # robot 4
+    "-1.550,5.775,-1.275,0,0,-1.57079632679",  # robot 5
+    "-1.200,5.925,-1.275,0,0,-1.57079632679",  # robot 6
 ]
 
 
@@ -74,10 +76,23 @@ def _launch_setup(context, *args, **kwargs):
     if spawn_delay < 0.0:
         raise RuntimeError("spawn_delay must be nonnegative.")
 
+    robot_names = [
+        LaunchConfiguration(f"robot_{index + 1}_name").perform(context).strip()
+        for index in range(robot_count)
+    ]
+    if any(not name for name in robot_names):
+        raise RuntimeError("All robot names must be nonempty.")
+    if len(set(robot_names)) != len(robot_names):
+        raise RuntimeError(
+            "Robot names must be unique; got "
+            + ", ".join(repr(name) for name in robot_names)
+            + "."
+        )
+
     actions = []
     for index in range(robot_count):
         instance = index
-        namespace = f"itrl_rov_{index + 1}"
+        namespace = robot_names[index]
         pose = LaunchConfiguration(f"rov_{index + 1}_pose").perform(context)
         delay = spawn_delay * index
 
@@ -139,10 +154,18 @@ def generate_launch_description() -> LaunchDescription:
     for index in range(MAX_ROBOTS):
         actions.append(
             DeclareLaunchArgument(
+                f"robot_{index + 1}_name",
+                default_value=f"itrl_rov_{index + 1}",
+                description=f"ROS/PX4 namespace of robot {index + 1}.",
+            )
+        )
+        actions.append(
+            DeclareLaunchArgument(
                 f"rov_{index + 1}_pose",
                 default_value=DEFAULT_POSES[index],
                 description=(
-                    f"Gazebo ENU pose of itrl_rov_{index + 1}: " "x,y,z,roll,pitch,yaw."
+                    f"Gazebo ENU pose of robot {index + 1}: "
+                    "x,y,z,roll,pitch,yaw."
                 ),
             )
         )

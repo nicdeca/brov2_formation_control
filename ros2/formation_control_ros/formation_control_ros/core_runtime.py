@@ -691,16 +691,17 @@ class FollowerCoreRuntime:
         )
 
         relaxation_rate = np.zeros(4, dtype=float)
+        next_relaxation_state = relaxation_state.copy()
         if self.task_config.adaptive:
-            relaxation_evaluation = self.relaxation.evaluate(
+            (
+                next_relaxation_state,
+                relaxation_rate,
+            ) = self.relaxation.advance(
                 relaxation_state,
                 conservative_values=sensing_values.values,
                 enabled=self._enabled_relaxation,
+                sample_time=dt,
             )
-            relaxation_rate = np.asarray(
-                relaxation_evaluation.selected_rate,
-                dtype=float,
-            ).copy()
 
         controller_time_s = perf_counter() - start_time
 
@@ -736,13 +737,9 @@ class FollowerCoreRuntime:
         # assembled, so snapshot[s] and snapshot[s_dot] correspond to x_k and
         # the control input generated at the same timer tick.
         if self.task_config.adaptive:
-            # Forward-Euler integration of the continuous-time auxiliary
-            # dynamics. Only tiny numerical undershoots below zero are
-            # removed; there is intentionally no upper clipping at s = 1.
-            self._relaxation_state = np.maximum(
-                relaxation_state + dt * relaxation_rate,
-                0.0,
-            )
+            # Implicit sampled-data update of the continuous auxiliary law.
+            # There is intentionally no upper clipping at s = 1.
+            self._relaxation_state = next_relaxation_state.copy()
 
         self._workspace.state = workspace_relaxation_state
         self._workspace.advance(workspace_relaxation_rate, dt=dt)

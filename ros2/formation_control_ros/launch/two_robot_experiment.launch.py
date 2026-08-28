@@ -18,12 +18,14 @@ from launch_ros.parameter_descriptions import ParameterValue
 PHASE_TOPIC = "/formation_control/experiment_phase"
 FORMATION_TOPIC = "/formation_control/desired_formation"
 
-# Core-NWU initialization geometry.
-INITIAL_LEADER_POSITION = [-1.20, 1.15, -95.20]
-INITIAL_FOLLOWER_POSITION = [-1.90, 2.95, -95.20]
+# Pool-aligned core-NWU initialization geometry.
+# Raw PX4 NED uses the same origin as the real pool; the controller core
+# flips East/Down to West/Up, hence z is negative below the surface.
+INITIAL_LEADER_POSITION = [2.675, 0.050, -0.775]
+INITIAL_FOLLOWER_POSITION = [4.475, 0.750, -0.775]
 
-# Parent-minus-follower vector.
-INITIAL_RELATIVE = [0.70, -1.80, 0.00]
+# Parent-minus-follower vector in pool-aligned core NWU.
+INITIAL_RELATIVE = [-1.800, -0.700, 0.000]
 
 FORMATION_NAMES = [
     # Normal experiment library.
@@ -56,26 +58,26 @@ FORMATION_NAMES = [
 #   is meant to excite horizontal FoV relaxation rather than encode a fixed
 #   image-coordinate value.
 FORMATION_RELATIVE_POSITIONS = [
-    0.70,
     -1.80,
+    -0.70,
     0.00,  # pair_nominal
-    1.00,
     -2.25,
+    -1.00,
     0.00,  # pair_far
-    0.40,
     -1.30,
+    -0.40,
     0.00,  # pair_close
-    0.70,
     -1.80,
+    -0.70,
     -0.20,  # pair_high
-    0.90,
     -3.05,
+    -0.90,
     0.00,  # pair_range_far_edge, norm ~= 3.18
-    0.15,
     -0.68,
+    -0.15,
     0.00,  # pair_range_close_edge, norm ~= 0.70
-    1.30,
     -1.55,
+    -1.30,
     0.00,  # pair_fov_edge
 ]
 
@@ -149,10 +151,10 @@ def generate_launch_description() -> LaunchDescription:
             workspace_adaptive,
             value_type=bool,
         ),
-        "workspace_physical_lower": [-3.125, -1.225, -96.58],
-        "workspace_physical_upper": [0.825, 5.575, -94.20],
-        "workspace_conservative_lower": [-2.975, -1.075, -96.38],
-        "workspace_conservative_upper": [0.675, 5.425, -94.75],
+        "workspace_physical_lower": [0.300, -1.975, -2.155],
+        "workspace_physical_upper": [7.100, 1.975, 0.225],
+        "workspace_conservative_lower": [0.450, -1.825, -1.955],
+        "workspace_conservative_upper": [6.950, 1.825, -0.325],
         "workspace_barrier_weight": 0.10,
         "workspace_reference_margin": 0.05,
         "workspace_relaxation_recovery_gain": 0.8,

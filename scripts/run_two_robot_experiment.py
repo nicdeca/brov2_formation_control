@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Run reproducible two-BlueROV formation experiments.
 
+Leader velocity commands are expressed in the pool-aligned core NWU frame.
+
 The script can be started before arming.  It waits for FORMATION and for the
 leader/follower command subscriptions.
 
@@ -30,6 +32,7 @@ from std_msgs.msg import String
 
 PHASE_TOPIC = "/formation_control/experiment_phase"
 FORMATION_TOPIC = "/formation_control/desired_formation"
+MISSION_STATUS_TOPIC = "/formation_control/mission_status"
 
 
 class TwoRobotExperimentRunner(Node):
@@ -60,6 +63,11 @@ class TwoRobotExperimentRunner(Node):
             FORMATION_TOPIC,
             formation_qos,
         )
+        self.mission_status_pub = self.create_publisher(
+            String,
+            MISSION_STATUS_TOPIC,
+            phase_qos,
+        )
         self.cmd_vel_topic = f"/{leader}/formation_control/cmd_vel"
         self.cmd_vel_pub = self.create_publisher(
             Twist,
@@ -73,6 +81,12 @@ class TwoRobotExperimentRunner(Node):
             self._phase_callback,
             phase_qos,
         )
+
+    def publish_mission_status(self, status: str) -> None:
+        message = String()
+        message.data = status.strip().upper()
+        self.mission_status_pub.publish(message)
+        self.get_logger().info(f"MISSION_STATUS {message.data}")
 
     def _phase_callback(self, message: String) -> None:
         self.phase = message.data.strip().upper()
@@ -188,10 +202,10 @@ class TwoRobotExperimentRunner(Node):
         self.publish_formation("pair_nominal")
         self.settle(10.0)
 
-        self.publish_velocity(0.0, 0.10, 0.0, duration=3.0)
+        self.publish_velocity(0.10, 0.0, 0.0, duration=3.0)
         self.settle(12.0)
 
-        self.publish_velocity(0.0, -0.10, 0.0, duration=3.0)
+        self.publish_velocity(-0.10, 0.0, 0.0, duration=3.0)
         self.settle(12.0)
 
         self.publish_formation("pair_close")
@@ -207,7 +221,7 @@ class TwoRobotExperimentRunner(Node):
         self.publish_formation("pair_nominal")
         self.settle(8.0)
 
-        self.publish_velocity(0.0, 0.14, 0.0, duration=5.0)
+        self.publish_velocity(0.14, 0.0, 0.0, duration=5.0)
         self.settle(8.0)
 
         self.publish_formation("pair_far")
@@ -216,19 +230,19 @@ class TwoRobotExperimentRunner(Node):
         self.publish_formation("pair_close")
         self.settle(12.0)
 
-        self.publish_velocity(0.10, 0.0, 0.0, duration=3.5)
+        self.publish_velocity(0.0, -0.10, 0.0, duration=3.5)
         self.settle(8.0)
 
         self.publish_formation("pair_high")
         self.settle(12.0)
 
-        self.publish_velocity(0.0, -0.14, 0.0, duration=5.0)
+        self.publish_velocity(-0.14, 0.0, 0.0, duration=5.0)
         self.settle(8.0)
 
         self.publish_formation("pair_nominal")
         self.settle(10.0)
 
-        self.publish_velocity(-0.10, 0.0, 0.0, duration=3.5)
+        self.publish_velocity(0.0, 0.10, 0.0, duration=3.5)
         self.settle(12.0)
         self.stop_leader()
         self.get_logger().info("=== FULL TWO-ROBOT EXPERIMENT COMPLETE ===")
@@ -256,7 +270,7 @@ class TwoRobotExperimentRunner(Node):
         self.settle(6.0)
 
         # Aggressive +y translation: about +1.2 m at 0.30 m/s.
-        self.publish_velocity(0.0, 0.30, 0.0, duration=4.0)
+        self.publish_velocity(0.30, 0.0, 0.0, duration=4.0)
         self.settle(6.0)
 
         # Horizontal FoV challenge.
@@ -264,7 +278,7 @@ class TwoRobotExperimentRunner(Node):
         self.settle(10.0)
 
         # Simultaneous large x/y leader maneuver, about (+0.8, -0.6) m.
-        self.publish_velocity(0.20, -0.15, 0.0, duration=4.0)
+        self.publish_velocity(-0.15, -0.20, 0.0, duration=4.0)
         self.settle(6.0)
 
         # Range-lower-bound challenge: ||d|| ~= 0.70 m.
@@ -272,7 +286,7 @@ class TwoRobotExperimentRunner(Node):
         self.settle(10.0)
 
         # Fast return in y while close.
-        self.publish_velocity(0.0, -0.15, 0.0, duration=4.0)
+        self.publish_velocity(-0.15, 0.0, 0.0, duration=4.0)
         self.settle(6.0)
 
         # Recover nominal geometry before undoing the lateral displacement.
@@ -280,7 +294,7 @@ class TwoRobotExperimentRunner(Node):
         self.settle(8.0)
 
         # Undo approximately the +0.8 m x displacement.
-        self.publish_velocity(-0.20, 0.0, 0.0, duration=4.0)
+        self.publish_velocity(0.0, 0.20, 0.0, duration=4.0)
         self.settle(10.0)
 
         self.stop_leader()
@@ -301,10 +315,16 @@ def main() -> None:
 
     rclpy.init()
     node = TwoRobotExperimentRunner(args.leader)
+    node.publish_mission_status("WAITING")
 
     try:
         node.wait_for_phase("FORMATION")
         node.wait_for_subscribers()
+
+        node.publish_mission_status("RUNNING")
+        # Give the split recorder time to open RUN/mission/bag before the
+        # first formation or velocity command is sent.
+        node._spin_sleep(1.0)
 
         if args.profile == "cautious":
             node.run_cautious()
@@ -313,12 +333,16 @@ def main() -> None:
         else:
             node.run_challenging()
 
+        node.publish_mission_status("COMPLETE")
+
     except KeyboardInterrupt:
+        node.publish_mission_status("ABORTED")
         node.get_logger().warn(
             "Experiment interrupted; commanding zero leader velocity."
         )
         node.stop_leader()
     except Exception as error:
+        node.publish_mission_status("ABORTED")
         node.get_logger().error(f"Experiment aborted: {error}")
         node.stop_leader()
         raise
