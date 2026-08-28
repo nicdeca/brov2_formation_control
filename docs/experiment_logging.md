@@ -19,15 +19,19 @@ split recorder
       |
       +--> initialization/bag
       |       |
-      |       +--> export_initialization_bag.py
+      |       +--> export_experiment.py
+      |       |       +--> export_initialization_bag.py
       |       +--> initialization_history.npz
-      |       +--> plot_initialization_experiment.py
+      |       +--> plot_experiment.py
+      |               +--> plot_initialization_experiment.py
       |
       +--> mission/bag
               |
-              +--> export_formation_bag.py
+              +--> export_experiment.py
+              |       +--> export_formation_bag.py
               +--> formation_history.npz
-              +--> plot_formation_experiment.py
+              +--> plot_experiment.py
+                      +--> plot_formation_experiment.py
 ```
 
 ## 2. Split semantics
@@ -108,19 +112,77 @@ scripts/record_formation_experiment.sh \
 
 Use `--no-postprocess` to record only.
 
-## 6. Initialization export and plots
+Without `--no-postprocess`, the recorder automatically calls the same
+`export_experiment.py` and `plot_experiment.py` umbrella commands after
+the run closes.
+
+## 6. Export both phases with one command
+
+For normal post-processing, use the umbrella exporter:
+
+```bash
+RUN=$(ls -dt outputs/experiments/* | head -n 1)
+
+python scripts/export_experiment.py "$RUN"
+```
+
+It exports every phase whose bag exists:
+
+```text
+initialization/bag -> initialization/initialization_history.npz
+mission/bag        -> mission/formation_history.npz
+```
+
+If initialization failed and no mission bag exists, the command still exports
+the initialization phase and simply reports that the mission is unavailable.
+
+To export only one phase:
+
+```bash
+python scripts/export_experiment.py "$RUN" --phase initialization
+python scripts/export_experiment.py "$RUN" --phase mission
+```
+
+The lower-level exporters remain available for debugging or custom workflows:
+
+```bash
+python scripts/export_initialization_bag.py "$RUN"
+python scripts/export_formation_bag.py "$RUN" --phase mission
+```
 
 The initialization exporter is deliberately tolerant of startup failures. It
 requires synchronized PX4 odometry; controller snapshots are decoded when
 available but are not required for the export to exist.
 
-```bash
-RUN=$(ls -dt outputs/experiments/* | head -n 1)
+## 7. Plot both phases with one command
 
-python scripts/export_initialization_bag.py "$RUN"
-python scripts/plot_initialization_experiment.py \
-  "$RUN/initialization/initialization_history.npz" \
-  --save
+After exporting, generate both initialization and mission plots with:
+
+```bash
+uv run python scripts/plot_experiment.py "$RUN"
+```
+
+The outputs are kept separate:
+
+```text
+initialization/plots/
+mission/plots/
+```
+
+The default mission preset is the paper-oriented plot set with paper-quality
+formatting. To generate all mission diagnostics instead:
+
+```bash
+uv run python scripts/plot_experiment.py "$RUN" --mission-preset all
+```
+
+Other useful options are:
+
+```bash
+uv run python scripts/plot_experiment.py "$RUN" --show-legends
+uv run python scripts/plot_experiment.py "$RUN" --format png
+uv run python scripts/plot_experiment.py "$RUN" --phase initialization
+uv run python scripts/plot_experiment.py "$RUN" --phase mission
 ```
 
 The initialization plotter produces:
@@ -132,24 +194,13 @@ The initialization plotter produces:
 - thruster utilization / required slack / armed / Offboard status.
 
 The default plotted phase-manager thresholds are `0.65 m` position error and
-`0.08 m/s` speed; override the plotter arguments if a launch uses different
-values.
+`0.08 m/s` speed; override the lower-level initialization plotter arguments if
+a launch uses different values.
 
-## 7. Mission export and paper plots
+The mission exporter still supports legacy runs containing `<run>/bag`. The
+umbrella exporter is intended for the current split-recording layout.
 
-```bash
-python scripts/export_formation_bag.py "$RUN" --phase mission
-
-uv run python scripts/plot_formation_experiment.py \
-  "$RUN/mission/formation_history.npz" \
-  --paper --paper-quality --save
-```
-
-The mission exporter still supports legacy runs containing `<run>/bag`. If no
-`--phase` is provided, it uses a legacy bag when present, otherwise it defaults
-to the split `mission` bag.
-
-Useful plot selectors include:
+Useful lower-level mission plot selectors include:
 
 ```text
 --trajectory

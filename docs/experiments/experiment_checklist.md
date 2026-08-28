@@ -59,6 +59,8 @@ Use this as the short operational checklist.
 - [ ] Mission bag closes cleanly.
 - [ ] Robots are disarmed when appropriate.
 - [ ] `initialization/` and, for a started mission, `mission/` exist.
-- [ ] Initialization NPZ/plots were generated or can be generated manually.
-- [ ] Mission NPZ/plots were generated or can be generated manually.
+- [ ] Run `python scripts/export_experiment.py "$RUN"` if export was not automatic.
+- [ ] Run `uv run python scripts/plot_experiment.py "$RUN"` if plots were not automatic.
+- [ ] Initialization NPZ/plots exist.
+- [ ] Mission NPZ/plots exist if the mission started.
 - [ ] Physical sensing/workspace margins are inspected before accepting the run.

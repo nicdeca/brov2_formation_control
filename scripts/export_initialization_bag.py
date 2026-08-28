@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Export an initialization rosbag without requiring valid controller outputs.
 
-Unlike the mission exporter, this exporter is intentionally tolerant of
-startup failures: synchronized PX4 odometry is sufficient. Controller
-diagnostic snapshots are decoded when available, but their absence does not
-prevent export.
+Synchronized PX4 odometry is sufficient. Controller diagnostics are decoded
+when available. Explicit initialization targets and workspace bounds can be
+supplied as fallbacks for older bags that were recorded before those data were
+published correctly.
 """
 
 from __future__ import annotations
@@ -230,6 +230,96 @@ def load_manifest(run_dir: Path) -> dict[str, Any]:
         return yaml.safe_load(stream)
 
 
+def _message_numeric_array(message: Any, width: int) -> np.ndarray | None:
+    """Extract a finite numeric vector from common ROS message layouts."""
+    for attribute in ("data", "values", "value", "xyz"):
+        if not hasattr(message, attribute):
+            continue
+        try:
+            value = np.asarray(getattr(message, attribute), dtype=float).reshape(-1)
+        except (TypeError, ValueError):
+            continue
+        if value.size != width:
+            continue
+        if not np.all(np.isfinite(value)):
+            continue
+        return value
+    return None
+
+
+def _message_numeric_scalar(message: Any) -> float | None:
+    """Extract one finite scalar from common ROS message layouts."""
+    for attribute in ("data", "value"):
+        if not hasattr(message, attribute):
+            continue
+        try:
+            value = np.asarray(getattr(message, attribute), dtype=float).reshape(-1)
+        except (TypeError, ValueError):
+            continue
+        if value.size != 1 or not np.isfinite(value[0]):
+            continue
+        return float(value[0])
+    return None
+
+
+def _nearest_vector(
+    bag: dict[str, TopicSeries],
+    topic: str,
+    timestamp_ns: int,
+    max_delta_ns: int,
+    width: int,
+) -> np.ndarray | None:
+    series = bag.get(topic)
+    if series is None:
+        return None
+    message = series.nearest(timestamp_ns, max_delta_ns)
+    if message is None:
+        return None
+    return _message_numeric_array(message, width)
+
+
+def _nearest_scalar(
+    bag: dict[str, TopicSeries],
+    topic: str,
+    timestamp_ns: int,
+    max_delta_ns: int,
+) -> float | None:
+    series = bag.get(topic)
+    if series is None:
+        return None
+    message = series.nearest(timestamp_ns, max_delta_ns)
+    if message is None:
+        return None
+    return _message_numeric_scalar(message)
+
+
+def _parse_initial_target(spec: str) -> tuple[str, np.ndarray]:
+    if ":" not in spec:
+        raise argparse.ArgumentTypeError(
+            "expected ROBOT:x,y,z, for example glub:4.475,0.750,-0.775"
+        )
+    robot, coordinates = spec.split(":", 1)
+    values = np.fromstring(coordinates, sep=",", dtype=float)
+    if not robot.strip() or values.shape != (3,) or not np.all(np.isfinite(values)):
+        raise argparse.ArgumentTypeError(
+            "expected ROBOT:x,y,z with three finite coordinates"
+        )
+    return robot.strip(), values
+
+
+def _workspace_margins_from_bounds(
+    positions: np.ndarray,
+    lower: np.ndarray,
+    upper: np.ndarray,
+) -> np.ndarray:
+    """Compute [x_min,x_max,y_min,y_max,z_min,z_max] wall margins."""
+    result = np.full((positions.shape[0], positions.shape[1], 6), np.nan)
+    for axis in range(3):
+        result[:, :, 2 * axis] = positions[:, :, axis] - lower[axis]
+        result[:, :, 2 * axis + 1] = upper[axis] - positions[:, :, axis]
+    return result
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("run_dir", type=Path)
@@ -249,6 +339,45 @@ def main() -> None:
         type=float,
         default=40.0,
     )
+    parser.add_argument(
+        "--initial-target",
+        action="append",
+        default=[],
+        type=_parse_initial_target,
+        metavar="ROBOT:X,Y,Z",
+        help=(
+            "absolute core-NWU initialization target for an older bag whose "
+            "controller snapshot did not contain the target; repeat per robot"
+        ),
+    )
+    parser.add_argument(
+        "--workspace-physical-lower",
+        nargs=3,
+        type=float,
+        metavar=("X", "Y", "Z"),
+        default=None,
+    )
+    parser.add_argument(
+        "--workspace-physical-upper",
+        nargs=3,
+        type=float,
+        metavar=("X", "Y", "Z"),
+        default=None,
+    )
+    parser.add_argument(
+        "--workspace-conservative-lower",
+        nargs=3,
+        type=float,
+        metavar=("X", "Y", "Z"),
+        default=None,
+    )
+    parser.add_argument(
+        "--workspace-conservative-upper",
+        nargs=3,
+        type=float,
+        metavar=("X", "Y", "Z"),
+        default=None,
+    )
     args = parser.parse_args()
 
     run_dir = args.run_dir.expanduser().resolve()
@@ -258,6 +387,7 @@ def main() -> None:
 
     manifest = load_manifest(run_dir)
     robots = [str(robot) for robot in manifest["robots"]]
+    robot_index = {robot: index for index, robot in enumerate(robots)}
     bag = read_bag(bag_dir)
 
     odometry_topics = {
@@ -268,6 +398,32 @@ def main() -> None:
     }
     diagnostic_topics = {
         robot: f"/{robot}/formation_control/diagnostic_snapshot"
+        for robot in robots
+    }
+    workspace_relaxation_topics = {
+        robot: f"/{robot}/formation_control/workspace_relaxation"
+        for robot in robots
+    }
+    workspace_physical_topics = {
+        robot: (
+            f"/{robot}/formation_control/"
+            "workspace_physical_constraint_values"
+        )
+        for robot in robots
+    }
+    workspace_conservative_topics = {
+        robot: (
+            f"/{robot}/formation_control/"
+            "workspace_conservative_constraint_values"
+        )
+        for robot in robots
+    }
+    required_slack_topics = {
+        robot: f"/{robot}/formation_control/required_slack"
+        for robot in robots
+    }
+    thruster_utilization_topics = {
+        robot: f"/{robot}/formation_control/thruster_utilization"
         for robot in robots
     }
 
@@ -304,12 +460,13 @@ def main() -> None:
     px4_armed = np.full((n, m), np.nan)
     px4_offboard_enabled = np.full((n, m), np.nan)
 
-    # Optional controller diagnostics used by the initialization plotter.
     reference_position = np.full((n, m, 3), np.nan)
+    desired_relative_position = np.full((n, m, 3), np.nan)
     required_slack = np.full((n, m), np.nan)
     thruster_utilization = np.full((n, m), np.nan)
     workspace_relaxation = np.full((n, m, 6), np.nan)
     workspace_physical_constraint_values = np.full((n, m, 6), np.nan)
+    workspace_conservative_constraint_values = np.full((n, m, 6), np.nan)
 
     reference_px4_times = np.full(n, np.nan)
 
@@ -358,6 +515,10 @@ def main() -> None:
                             reference_position[step, agent] = decoded[
                                 "reference_position"
                             ]
+                        if "desired_relative_position" in decoded:
+                            desired_relative_position[step, agent] = decoded[
+                                "desired_relative_position"
+                            ]
                         if "required_slack" in decoded:
                             required_slack[step, agent] = decoded[
                                 "required_slack"
@@ -376,6 +537,125 @@ def main() -> None:
                             ] = decoded[
                                 "workspace_physical_constraint_values"
                             ]
+                        if "workspace_conservative_constraint_values" in decoded:
+                            workspace_conservative_constraint_values[
+                                step, agent
+                            ] = decoded[
+                                "workspace_conservative_constraint_values"
+                            ]
+
+            # Prefer dedicated workspace topics when present.  These are
+            # particularly useful during INITIALIZE, where the follower runs
+            # an absolute-position LeaderCoreRuntime.
+            value = _nearest_vector(
+                bag,
+                workspace_relaxation_topics[robot],
+                stamp,
+                max_delta_ns,
+                6,
+            )
+            if value is not None:
+                workspace_relaxation[step, agent] = value
+
+            value = _nearest_vector(
+                bag,
+                workspace_physical_topics[robot],
+                stamp,
+                max_delta_ns,
+                6,
+            )
+            if value is not None:
+                workspace_physical_constraint_values[step, agent] = value
+
+            value = _nearest_vector(
+                bag,
+                workspace_conservative_topics[robot],
+                stamp,
+                max_delta_ns,
+                6,
+            )
+            if value is not None:
+                workspace_conservative_constraint_values[step, agent] = value
+
+            scalar = _nearest_scalar(
+                bag,
+                required_slack_topics[robot],
+                stamp,
+                max_delta_ns,
+            )
+            if scalar is not None:
+                required_slack[step, agent] = scalar
+
+            scalar = _nearest_scalar(
+                bag,
+                thruster_utilization_topics[robot],
+                stamp,
+                max_delta_ns,
+            )
+            if scalar is not None:
+                thruster_utilization[step, agent] = scalar
+
+    explicit_targets: dict[str, list[float]] = {}
+    for robot, target in args.initial_target:
+        if robot not in robot_index:
+            raise SystemExit(
+                f"--initial-target refers to unknown robot {robot!r}; "
+                f"known robots: {tuple(robots)}"
+            )
+        reference_position[:, robot_index[robot], :] = target
+        explicit_targets[robot] = target.tolist()
+        print(f"Using explicit initialization target for {robot}: {target.tolist()}")
+
+    workspace_args = (
+        args.workspace_physical_lower,
+        args.workspace_physical_upper,
+        args.workspace_conservative_lower,
+        args.workspace_conservative_upper,
+    )
+    if any(value is not None for value in workspace_args):
+        if not all(value is not None for value in workspace_args):
+            raise SystemExit(
+                "When supplying workspace fallback bounds, provide all four: "
+                "physical lower/upper and conservative lower/upper."
+            )
+        physical_lower = np.asarray(args.workspace_physical_lower, dtype=float)
+        physical_upper = np.asarray(args.workspace_physical_upper, dtype=float)
+        conservative_lower = np.asarray(
+            args.workspace_conservative_lower, dtype=float
+        )
+        conservative_upper = np.asarray(
+            args.workspace_conservative_upper, dtype=float
+        )
+        if not (
+            np.all(physical_lower < physical_upper)
+            and np.all(conservative_lower < conservative_upper)
+            and np.all(physical_lower <= conservative_lower)
+            and np.all(conservative_upper <= physical_upper)
+        ):
+            raise SystemExit("Invalid workspace fallback bounds.")
+
+        fallback_physical = _workspace_margins_from_bounds(
+            positions, physical_lower, physical_upper
+        )
+        fallback_conservative = _workspace_margins_from_bounds(
+            positions, conservative_lower, conservative_upper
+        )
+        missing = ~np.isfinite(workspace_physical_constraint_values)
+        workspace_physical_constraint_values[missing] = fallback_physical[missing]
+        missing = ~np.isfinite(workspace_conservative_constraint_values)
+        workspace_conservative_constraint_values[missing] = (
+            fallback_conservative[missing]
+        )
+        workspace_bounds_metadata = {
+            "physical_lower": physical_lower.tolist(),
+            "physical_upper": physical_upper.tolist(),
+            "conservative_lower": conservative_lower.tolist(),
+            "conservative_upper": conservative_upper.tolist(),
+            "source": "explicit_export_fallback",
+        }
+        print("Filled missing workspace margins from explicit workspace bounds.")
+    else:
+        workspace_bounds_metadata = None
 
     if np.all(np.isfinite(reference_px4_times)) and np.all(
         np.diff(reference_px4_times) > 0.0
@@ -388,7 +668,7 @@ def main() -> None:
         time_source = "rosbag_receive_timestamp"
 
     metadata = {
-        "schema_version": 1,
+        "schema_version": 3,
         "kind": "initialization_history",
         "robots": robots,
         "edges": list(manifest.get("edges", [])),
@@ -396,6 +676,8 @@ def main() -> None:
         "source_run_dir": str(run_dir),
         "time_source": time_source,
         "max_sync_ms": float(args.max_sync_ms),
+        "explicit_initialization_targets": explicit_targets,
+        "workspace_bounds": workspace_bounds_metadata,
     }
 
     output = (
@@ -415,10 +697,14 @@ def main() -> None:
         px4_armed=px4_armed,
         px4_offboard_enabled=px4_offboard_enabled,
         reference_position=reference_position,
+        desired_relative_position=desired_relative_position,
         required_slack=required_slack,
         thruster_utilization=thruster_utilization,
         workspace_relaxation=workspace_relaxation,
         workspace_physical_constraint_values=workspace_physical_constraint_values,
+        workspace_conservative_constraint_values=(
+            workspace_conservative_constraint_values
+        ),
         metadata_json=np.asarray(json.dumps(metadata)),
     )
 
