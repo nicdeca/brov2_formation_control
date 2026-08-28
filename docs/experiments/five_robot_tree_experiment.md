@@ -101,3 +101,16 @@ Inspect every directed edge, not only the first-level followers:
 
 Inspect every robot for workspace margin/relaxation, thruster forces,
 actuation feasibility and controller timing.
+
+
+## Post-processing shortcut
+
+For a completed split-recorded run:
+
+```bash
+python scripts/export_experiment.py "$RUN"
+uv run python scripts/plot_experiment.py "$RUN"
+```
+
+These commands process every available phase and keep initialization and mission
+outputs in their respective folders.

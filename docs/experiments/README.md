@@ -60,7 +60,10 @@ mission_status = RUNNING -------> open mission/bag
 mission_status = COMPLETE ------> close mission/bag
         |
         v
-export + plot initialization and mission separately
+export both phases: python scripts/export_experiment.py "$RUN"
+        |
+        v
+plot both phases:  uv run python scripts/plot_experiment.py "$RUN"
 ```
 
 On an interrupted mission, the runner publishes `ABORTED` and the mission bag

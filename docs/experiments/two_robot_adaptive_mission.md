@@ -91,3 +91,16 @@ The important paper diagnostics are:
 
 The normalized sensing enlargement state is not upper-clipped. `s > 1` should
 therefore always be interpreted together with the physical-margin diagnostic.
+
+
+## Post-processing shortcut
+
+For a completed split-recorded run:
+
+```bash
+python scripts/export_experiment.py "$RUN"
+uv run python scripts/plot_experiment.py "$RUN"
+```
+
+These commands process every available phase and keep initialization and mission
+outputs in their respective folders.

@@ -209,3 +209,16 @@ Mission:
 - workspace margins and relaxation;
 - CLF required slack / actuation margin;
 - controller timing.
+
+
+## Post-processing shortcut
+
+For a completed split-recorded run:
+
+```bash
+python scripts/export_experiment.py "$RUN"
+uv run python scripts/plot_experiment.py "$RUN"
+```
+
+These commands process every available phase and keep initialization and mission
+outputs in their respective folders.
