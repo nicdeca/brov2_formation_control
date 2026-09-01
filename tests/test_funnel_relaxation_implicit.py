@@ -15,16 +15,17 @@ def _policy() -> FunnelRelaxationPolicy:
     )
 
 
-def test_projection_repairs_residual_not_only_raw_constraint() -> None:
+def test_projection_repairs_state_dependent_adaptive_margin() -> None:
     policy = _policy()
     enabled = np.array([False, False, True, False])
 
-    margin = policy.domain_margin[2]
     maximum = policy.maximum_enlargement[2]
+    mu_s = policy.domain_margin_ratio
 
-    # h_a is still positive, but y = h_a - h_margin is negative.  The old
-    # projection did not repair this case.
-    conservative = np.array([1.0, 1.0, margin - 0.01, 1.0])
+    # At s=0, y = h_c - mu_s rho_max.  Put y slightly below zero.
+    conservative = np.array(
+        [1.0, 1.0, mu_s * maximum - 0.01, 1.0]
+    )
     state = np.zeros(4)
 
     projected, correction = policy.project_to_current_domain(
@@ -35,32 +36,33 @@ def test_projection_repairs_residual_not_only_raw_constraint() -> None:
 
     residual = (
         conservative[2]
-        + maximum * projected[2]
-        - policy.domain_margin[2]
+        - mu_s * maximum
+        + (1.0 + mu_s) * maximum * projected[2]
     )
     assert correction[2] > 0.0
     assert residual >= policy.minimum_constraint_margin - 1e-12
+    assert projected[2] <= 1.0
 
 
 def test_implicit_step_avoids_forward_euler_singularity_spike() -> None:
     policy = _policy()
     enabled = np.array([False, False, True, False])
 
-    margin = policy.domain_margin[2]
+    maximum = policy.maximum_enlargement[2]
+    mu_s = policy.domain_margin_ratio
+
+    # At s=0 choose h_c so that y equals the numerical denominator floor.
     conservative = np.array(
         [
             1.0,
             1.0,
-            margin + policy.minimum_constraint_margin,
+            mu_s * maximum + policy.minimum_constraint_margin,
             1.0,
         ]
     )
     state = np.zeros(4)
     dt = 0.02
 
-    # At this sample the explicit law evaluates essentially at the numerical
-    # denominator floor and would generate the pathological O(10^2) one-step
-    # state increment observed in SITL.
     evaluation = policy.evaluate(
         state,
         conservative_values=conservative,
@@ -75,10 +77,10 @@ def test_implicit_step_avoids_forward_euler_singularity_spike() -> None:
         sample_time=dt,
     )
 
-    assert explicit_state[2] > 100.0
+    assert explicit_state[2] > 1.0
     assert np.all(np.isfinite(implicit_state))
     assert np.all(np.isfinite(effective_rate))
-    assert 0.0 < implicit_state[2] < 1.0
+    assert 0.0 < implicit_state[2] <= 1.0
 
 
 def test_implicit_step_matches_implicit_recovery_when_barrier_is_off() -> None:
@@ -102,17 +104,59 @@ def test_implicit_step_matches_implicit_recovery_when_barrier_is_off() -> None:
     assert np.isclose(next_state[2], expected, rtol=0.0, atol=1e-10)
 
 
-def test_implicit_step_does_not_clip_state_at_one() -> None:
+def test_upper_projection_blocks_outward_rate_at_s_one() -> None:
     policy = _policy()
     enabled = np.array([False, False, True, False])
-    state = np.array([0.0, 0.0, 1.2, 0.0])
-    conservative = np.array([1.0, 1.0, 1.0, 1.0])
 
-    next_state, _ = policy.advance(
+    maximum = policy.maximum_enlargement[2]
+    state = np.array([0.0, 0.0, 1.0, 0.0])
+
+    # At s=1, y equals the physical margin.  Make it small enough that the
+    # unprojected barrier action dominates recovery.
+    conservative = np.array(
+        [1.0, 1.0, -maximum + 0.01, 1.0]
+    )
+
+    evaluation = policy.evaluate(
+        state,
+        conservative_values=conservative,
+        enabled=enabled,
+    )
+    next_state, effective_rate = policy.advance(
         state,
         conservative_values=conservative,
         enabled=enabled,
         sample_time=0.02,
     )
 
-    assert 1.0 < next_state[2] < state[2]
+    assert evaluation.barrier_rate[2] > -evaluation.reference_rate[2]
+    assert evaluation.selected_rate[2] == 0.0
+    assert next_state[2] == 1.0
+    assert effective_rate[2] == 0.0
+
+
+def test_upper_projection_allows_recovery_from_s_one() -> None:
+    policy = _policy()
+    enabled = np.array([False, False, True, False])
+    state = np.array([0.0, 0.0, 1.0, 0.0])
+
+    # Large h_c switches the barrier term off, so the projected vector field
+    # points inward and recovery from s=1 is allowed.
+    conservative = np.array([1.0, 1.0, 1.0, 1.0])
+    dt = 0.02
+
+    evaluation = policy.evaluate(
+        state,
+        conservative_values=conservative,
+        enabled=enabled,
+    )
+    next_state, _ = policy.advance(
+        state,
+        conservative_values=conservative,
+        enabled=enabled,
+        sample_time=dt,
+    )
+
+    expected = 1.0 / (1.0 + dt * policy.recovery_gain[2])
+    assert evaluation.selected_rate[2] < 0.0
+    assert np.isclose(next_state[2], expected, rtol=0.0, atol=1e-10)

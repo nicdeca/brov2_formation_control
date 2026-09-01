@@ -3,23 +3,31 @@
 For each scalar constraint the adaptive domain is
 
     h_a(x, s) = h_c(x) + rho_max s,
-    s >= 0,
+    s in [0, 1],
 
-where ``s = 0`` recovers the conservative domain and ``s = 1`` places the
-zero level set at the corresponding physical limit.  The enlargement state is
-not artificially capped at one: values above one quantify how much additional
-domain enlargement the auxiliary dynamics request.  Physical admissibility is
-reported separately.
+where ``s = 0`` recovers the conservative domain and ``s = 1`` makes the
+adaptive constraint coincide with the corresponding physical constraint.
 
-The auxiliary dynamics use only the current constraint value,
+The state-dependent inner margin is
 
-    s_dot = -k_s s + k_b sigma(y) rho_max / y,
-    y = h_a - h_margin,
+    h_inner(s) = mu_s rho_max (1 - s),
 
-with a C2 smoothstep ``sigma``.  The barrier action is zero away from the
-adaptive boundary, turns on smoothly, and becomes singular as ``y -> 0+``.
-Consequently no parent velocity or derivative of ``h_c`` is required by the
-adaptation law.
+so that
+
+    y = h_a - h_inner
+      = h_c - mu_s rho_max + (1 + mu_s) rho_max s.
+
+The unconstrained enlargement direction is
+
+    v = -k_s s + k_b (1 + mu_s) rho_max sigma(y) / y,
+
+and the actual continuous-time dynamics apply the upper projection
+
+    s_dot = Pi_{<=1}(s, v).
+
+No lower projection is needed: at ``s = 0`` the unprojected vector field is
+nonnegative.  The implementation uses an implicit sampled-data step to avoid
+large explicit-Euler increments close to ``y = 0``.
 """
 
 from __future__ import annotations
@@ -50,7 +58,7 @@ def _vector4(value: float | FloatArray, *, name: str) -> FloatArray:
 
 
 class FunnelRelaxationInfeasibleError(RuntimeError):
-    """Raised when a channel has no enlargement reserve near singularity."""
+    """Raised when the physical domain cannot accommodate a channel."""
 
 
 @dataclass(frozen=True)
@@ -98,7 +106,11 @@ class FunnelRelaxationPolicy:
     maximum_enlargement: FloatArray
     recovery_gain: FloatArray | float = 0.8
     barrier_gain: FloatArray | float = 0.20
+
+    # Paper notation: mu_s.  The historical name is retained to avoid
+    # unnecessary configuration/API changes elsewhere in the codebase.
     domain_margin_ratio: float = 0.10
+
     activation_on_ratio: float = 0.10
     activation_off_ratio: float = 0.30
     minimum_constraint_margin: float = 1e-5
@@ -114,9 +126,13 @@ class FunnelRelaxationPolicy:
             raise ValueError("recovery_gain must be nonnegative.")
         if np.any(barrier < 0.0):
             raise ValueError("barrier_gain must be nonnegative.")
-        if not np.isfinite(self.domain_margin_ratio) or not 0.0 < self.domain_margin_ratio < 1.0:
+        if not np.isfinite(self.domain_margin_ratio) or not (
+            0.0 < self.domain_margin_ratio < 1.0
+        ):
             raise ValueError("domain_margin_ratio must lie strictly in (0, 1).")
-        if not np.isfinite(self.activation_on_ratio) or self.activation_on_ratio <= 0.0:
+        if not np.isfinite(self.activation_on_ratio) or (
+            self.activation_on_ratio <= 0.0
+        ):
             raise ValueError("activation_on_ratio must be finite and positive.")
         if not np.isfinite(self.activation_off_ratio) or (
             self.activation_off_ratio <= self.activation_on_ratio
@@ -133,15 +149,30 @@ class FunnelRelaxationPolicy:
 
     @property
     def domain_margin(self) -> FloatArray:
-        """Positive adaptive-domain margin h_margin."""
-        return np.maximum(
-            self.minimum_constraint_margin,
-            self.domain_margin_ratio * self.maximum_enlargement,
+        """Inner margin at s=0, i.e. mu_s rho_max.
+
+        Kept as a property for backward compatibility.  The current
+        state-dependent margin is returned by :meth:`inner_margin`.
+        """
+        return self.domain_margin_ratio * self.maximum_enlargement
+
+    def inner_margin(self, state: FloatArray) -> FloatArray:
+        """State-dependent inner margin mu_s rho_max (1-s)."""
+        state = self.validate_state(state)
+        return (
+            self.domain_margin_ratio
+            * self.maximum_enlargement
+            * (1.0 - state)
         )
 
     @property
+    def adaptive_margin_state_gain(self) -> FloatArray:
+        """Derivative dy/ds = (1 + mu_s) rho_max."""
+        return (1.0 + self.domain_margin_ratio) * self.maximum_enlargement
+
+    @property
     def activation_on_margin(self) -> FloatArray:
-        """Residual margin below which the barrier action is fully active."""
+        """Adaptive margin below which the barrier action is fully active."""
         return np.maximum(
             self.minimum_constraint_margin,
             self.activation_on_ratio * self.maximum_enlargement,
@@ -149,7 +180,7 @@ class FunnelRelaxationPolicy:
 
     @property
     def activation_off_margin(self) -> FloatArray:
-        """Residual margin above which the barrier action is exactly zero."""
+        """Adaptive margin above which the barrier action is exactly zero."""
         return np.maximum(
             2.0 * self.minimum_constraint_margin,
             self.activation_off_ratio * self.maximum_enlargement,
@@ -160,11 +191,13 @@ class FunnelRelaxationPolicy:
 
     def validate_state(self, state: FloatArray) -> FloatArray:
         state = _vector4(state, name="state")
-        if np.any(state < -1e-9):
-            raise ValueError("normalized funnel state must be nonnegative.")
-        # Remove only tiny integration roundoff below zero.  There is
-        # intentionally no upper clipping.
-        return np.maximum(state, 0.0)
+        tolerance = 1e-9
+        if np.any(state < -tolerance) or np.any(state > 1.0 + tolerance):
+            raise ValueError("normalized funnel state must lie in [0, 1].")
+        # Numerical cleanup only; the continuous dynamics themselves require
+        # only the upper projection because the vector field is nonnegative
+        # at s=0.
+        return np.clip(state, 0.0, 1.0)
 
     def enlargement(self, state: FloatArray) -> FloatArray:
         return self.maximum_enlargement * self.validate_state(state)
@@ -183,6 +216,58 @@ class FunnelRelaxationPolicy:
         xi = (y_off - y) / (y_off - y_on)
         return float(6.0 * xi**5 - 15.0 * xi**4 + 10.0 * xi**3)
 
+    def _adaptive_margin_value(
+        self,
+        index: int,
+        state_value: float,
+        conservative_value: float,
+    ) -> float:
+        maximum = float(self.maximum_enlargement[index])
+        mu_s = float(self.domain_margin_ratio)
+        return (
+            conservative_value
+            - mu_s * maximum
+            + (1.0 + mu_s) * maximum * state_value
+        )
+
+    def _state_for_margin(
+        self,
+        index: int,
+        conservative_value: float,
+        target_margin: float,
+    ) -> float:
+        """Smallest s producing the requested adaptive margin.
+
+        If the requested numerical margin cannot be attained before s=1 but
+        the physical constraint is still strictly satisfied, the result is
+        saturated at one.  If even the physical constraint is nonpositive,
+        the channel is infeasible.
+        """
+        maximum = float(self.maximum_enlargement[index])
+        mu_s = float(self.domain_margin_ratio)
+
+        if maximum <= 0.0:
+            if conservative_value <= 0.0:
+                raise FunnelRelaxationInfeasibleError(
+                    f"{FUNNEL_CHANNELS[index]} has no relaxation reserve."
+                )
+            return 0.0
+
+        physical_value = conservative_value + maximum
+        if physical_value <= 0.0:
+            raise FunnelRelaxationInfeasibleError(
+                f"{FUNNEL_CHANNELS[index]} physical constraint is not satisfied."
+            )
+
+        coefficient = (1.0 + mu_s) * maximum
+        required = (
+            target_margin
+            - conservative_value
+            + mu_s * maximum
+        ) / coefficient
+
+        return min(1.0, max(0.0, required))
+
     def project_to_current_domain(
         self,
         state: FloatArray,
@@ -190,15 +275,18 @@ class FunnelRelaxationPolicy:
         *,
         enabled: FloatArray,
     ) -> tuple[FloatArray, FloatArray]:
-        """Emergency sampled-data repair of the residual barrier domain.
+        """Emergency sampled-data repair of the adaptive-margin domain.
 
-        This is not part of the nominal adaptation law. If a sampled
-        measurement has already crossed the numerical residual boundary
+        This is not part of the nominal adaptation law.  If a sampled
+        measurement has already reached the numerical neighborhood of
 
-            y = h_c + rho_max s - h_margin > 0,
+            y = h_c - mu_s rho_max + (1 + mu_s) rho_max s = 0,
 
-        increase ``s`` only enough to restore
-        ``y = minimum_constraint_margin``. No upper clipping is applied.
+        ``s`` is increased only enough to recover the numerical margin when
+        possible, while always respecting ``s <= 1``.  If the requested
+        numerical floor cannot be reached but the physical constraint remains
+        strictly positive, the repair saturates at ``s = 1``.  A nonpositive
+        physical constraint is reported as infeasible.
         """
         state = self.validate_state(state)
         base = _vector4(conservative_values, name="conservative_values")
@@ -208,27 +296,24 @@ class FunnelRelaxationPolicy:
 
         projected = state.copy()
         correction = np.zeros(4, dtype=float)
-        margin = self.domain_margin
         residual_floor = self.minimum_constraint_margin
 
         for index in range(4):
             if not active[index]:
                 continue
 
-            maximum = self.maximum_enlargement[index]
-            adaptive_value = base[index] + maximum * projected[index]
-            residual = adaptive_value - margin[index]
+            residual = self._adaptive_margin_value(
+                index,
+                float(projected[index]),
+                float(base[index]),
+            )
             if residual > residual_floor:
                 continue
 
-            if maximum <= 0.0:
-                raise FunnelRelaxationInfeasibleError(
-                    f"{FUNNEL_CHANNELS[index]} has no relaxation reserve."
-                )
-
-            required_state = max(
-                0.0,
-                (margin[index] + residual_floor - base[index]) / maximum,
+            required_state = self._state_for_margin(
+                index,
+                float(base[index]),
+                residual_floor,
             )
             correction[index] = max(
                 0.0,
@@ -236,6 +321,7 @@ class FunnelRelaxationPolicy:
             )
             projected[index] = max(projected[index], required_state)
 
+        projected = self.validate_state(projected)
         return projected, correction
 
     def advance(
@@ -246,16 +332,17 @@ class FunnelRelaxationPolicy:
         enabled: FloatArray,
         sample_time: float,
     ) -> tuple[FloatArray, FloatArray]:
-        """Advance the auxiliary states with an implicit sampled-data step.
+        """Advance the projected auxiliary dynamics with an implicit step.
 
-        The continuous law is unchanged. For every enabled channel, this solves
+        For ``s < 1`` the continuous law is
 
-            s_{k+1} = s_k + dt * f(s_{k+1}; h_{c,k})
+            s_dot = -k_s s
+                    + k_b (1 + mu_s) rho_max sigma(y) / y,
 
-        with the current sampled ``h_c`` held fixed. This avoids the large
-        one-step overshoot that explicit Euler can produce close to the
-        singular residual boundary. The returned rate is the effective
-        sampled-data rate ``(s_{k+1} - s_k) / dt``.
+        while at ``s = 1`` its positive component is removed by the upper
+        projection.  The current sampled ``h_c`` is held fixed during the
+        implicit step.  The returned rate is the effective sampled-data rate
+        ``(s_{k+1} - s_k) / dt``.
         """
         if not np.isfinite(sample_time) or sample_time <= 0.0:
             raise ValueError("sample_time must be finite and positive.")
@@ -272,10 +359,10 @@ class FunnelRelaxationPolicy:
         )
         next_state = state.copy()
 
-        margin = self.domain_margin
         y_on = self.activation_on_margin
         y_off = self.activation_off_margin
         residual_floor = self.minimum_constraint_margin
+        mu_s = float(self.domain_margin_ratio)
 
         for index in range(4):
             if not active[index]:
@@ -288,26 +375,27 @@ class FunnelRelaxationPolicy:
             recovery = float(self.recovery_gain[index])
             barrier = float(self.barrier_gain[index])
             old_state = float(state[index])
+            state_gain = (1.0 + mu_s) * maximum
+
+            minimum_state = self._state_for_margin(
+                index,
+                float(base[index]),
+                residual_floor,
+            )
 
             if barrier <= 0.0:
                 candidate = old_state / (1.0 + sample_time * recovery)
-                minimum_state = max(
-                    0.0,
-                    (
-                        float(margin[index])
-                        + residual_floor
-                        - float(base[index])
-                    )
-                    / maximum,
+                next_state[index] = min(
+                    1.0,
+                    max(candidate, minimum_state),
                 )
-                next_state[index] = max(candidate, minimum_state)
                 continue
 
             def equation(candidate: float) -> float:
-                y = (
-                    float(base[index])
-                    + maximum * candidate
-                    - float(margin[index])
+                y = self._adaptive_margin_value(
+                    index,
+                    candidate,
+                    float(base[index]),
                 )
                 y_safe = max(y, residual_floor)
                 sigma = self._smoothstep_activation(
@@ -315,57 +403,34 @@ class FunnelRelaxationPolicy:
                     float(y_on[index]),
                     float(y_off[index]),
                 )
-                barrier_rate = barrier * sigma * maximum / y_safe
+                barrier_rate = barrier * sigma * state_gain / y_safe
                 return (
                     (1.0 + sample_time * recovery) * candidate
                     - old_state
                     - sample_time * barrier_rate
                 )
 
-            lower = max(
-                0.0,
-                (
-                    float(margin[index])
-                    + residual_floor
-                    - float(base[index])
-                )
-                / maximum,
-            )
+            lower = minimum_state
+            upper = 1.0
 
-            activation_off_state = max(
-                0.0,
-                (
-                    float(margin[index])
-                    + float(y_off[index])
-                    - float(base[index])
-                )
-                / maximum,
-            )
-            recovery_state = old_state / (1.0 + sample_time * recovery)
-            upper = max(
-                lower + 1.0,
-                activation_off_state,
-                recovery_state,
-            )
+            # If even the numerical floor is only attainable at the physical
+            # limit, remain at that limit.
+            if lower >= upper:
+                next_state[index] = upper
+                continue
 
             f_lower = equation(lower)
-            f_upper = equation(upper)
-
             if f_lower >= 0.0:
                 next_state[index] = lower
                 continue
 
-            if f_upper < 0.0:
-                for _ in range(32):
-                    upper = max(2.0 * upper, upper + 1.0)
-                    f_upper = equation(upper)
-                    if f_upper >= 0.0:
-                        break
-                else:
-                    raise RuntimeError(
-                        "could not bracket implicit funnel-relaxation step "
-                        f"for channel {FUNNEL_CHANNELS[index]}."
-                    )
+            f_upper = equation(upper)
+
+            # The unconstrained implicit step would lie above one.  This is
+            # precisely the outward direction removed by Pi_{<=1}.
+            if f_upper <= 0.0:
+                next_state[index] = upper
+                continue
 
             for _ in range(60):
                 middle = 0.5 * (lower + upper)
@@ -391,16 +456,19 @@ class FunnelRelaxationPolicy:
         conservative_rates: FloatArray | None = None,
         sample_time: float | None = None,
     ) -> FunnelRelaxationEvaluation:
-        """Evaluate the continuous-time smooth barrier-gradient law.
+        """Evaluate the continuous-time projected adaptation law.
 
-        For every enabled channel
+        For every enabled channel,
 
-            y = h_c + rho_max s - h_margin,
-            s_dot = -k_s s + k_b sigma(y) rho_max / y.
+            y = h_c - mu_s rho_max + (1 + mu_s) rho_max s,
+
+            v = -k_s s
+                + k_b (1 + mu_s) rho_max sigma(y) / y,
+
+            s_dot = Pi_{<=1}(s, v).
 
         A tiny positive denominator is used only as a discrete-time numerical
-        safeguard if a caller evaluates the law after an undershoot of the
-        theoretical boundary.
+        safeguard if a caller evaluates the law after a finite-step undershoot.
         """
         del conservative_rates, sample_time
 
@@ -412,7 +480,7 @@ class FunnelRelaxationPolicy:
 
         rho = self.maximum_enlargement * state
         adaptive = base + rho
-        residual = adaptive - self.domain_margin
+        residual = adaptive - self.inner_margin(state)
         reference = self.reference_rate(state)
         selected = np.zeros(4, dtype=float)
         activation = np.zeros(4, dtype=float)
@@ -421,6 +489,7 @@ class FunnelRelaxationPolicy:
 
         y_on = self.activation_on_margin
         y_off = self.activation_off_margin
+        state_gain = self.adaptive_margin_state_gain
 
         for index in range(4):
             if not active[index]:
@@ -428,24 +497,41 @@ class FunnelRelaxationPolicy:
 
             maximum = self.maximum_enlargement[index]
             if maximum <= 0.0:
-                if adaptive[index] <= self.minimum_constraint_margin:
+                if adaptive[index] <= 0.0:
                     raise FunnelRelaxationInfeasibleError(
                         f"{FUNNEL_CHANNELS[index]} has no relaxation reserve."
                     )
                 continue
 
             sigma = self._smoothstep_activation(
-                residual[index], y_on[index], y_off[index]
+                residual[index],
+                y_on[index],
+                y_off[index],
             )
             activation[index] = sigma
 
             # The continuous law is defined for y>0.  max(...) is only a
             # numerical safeguard for finite-step integration/measurement noise.
-            y_safe = max(float(residual[index]), self.minimum_constraint_margin)
-            barrier_rate[index] = (
-                self.barrier_gain[index] * sigma * maximum / y_safe
+            y_safe = max(
+                float(residual[index]),
+                self.minimum_constraint_margin,
             )
-            selected[index] = reference[index] + barrier_rate[index]
+            barrier_rate[index] = (
+                self.barrier_gain[index]
+                * sigma
+                * state_gain[index]
+                / y_safe
+            )
+
+            unprojected_rate = reference[index] + barrier_rate[index]
+
+            # Upper projection Pi_{<=1}.  No lower projection is necessary:
+            # at s=0, reference=0 and the barrier term is nonnegative.
+            if state[index] >= 1.0 - 1e-12:
+                selected[index] = min(0.0, unprojected_rate)
+            else:
+                selected[index] = unprojected_rate
+
             expansion_required[index] = selected[index] > 1e-12
 
         return FunnelRelaxationEvaluation(
