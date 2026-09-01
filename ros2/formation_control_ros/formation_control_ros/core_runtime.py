@@ -738,7 +738,8 @@ class FollowerCoreRuntime:
         # the control input generated at the same timer tick.
         if self.task_config.adaptive:
             # Implicit sampled-data update of the continuous auxiliary law.
-            # There is intentionally no upper clipping at s = 1.
+            # FunnelRelaxationPolicy.advance() applies the upper projection
+            # and therefore keeps the adaptive-domain state in [0, 1].
             self._relaxation_state = next_relaxation_state.copy()
 
         self._workspace.state = workspace_relaxation_state
@@ -783,7 +784,6 @@ class FollowerCoreRuntime:
             ),
             snapshot=snapshot,
         )
-
 
 
 class LeaderCoreRuntime:

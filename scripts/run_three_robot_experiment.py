@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
-"""Run the reproducible three-BlueROV formation experiment.
+"""Run reproducible three-BlueROV formation experiments.
 
-The script may be started before the robots are armed.  It waits for the
-global FORMATION phase, verifies that the expected subscribers are present,
-then executes a timed sequence of formation switches and leader velocity
-commands.
+Leader velocity commands are expressed in the current pool-aligned core NWU
+frame.
 
-All velocity commands use the leader's standard cmd_vel interface, so the
-same wall-aware reference projection and CLF-QP used by keyboard teleoperation
-remain active.
+The script may be started before arming. It publishes the transient-local
+mission-status lifecycle expected by the split experiment recorder:
+
+    WAITING -> RUNNING -> COMPLETE
+
+or ABORTED on interruption/error.
+
+Profiles:
+  cautious  Moderate first wet-test validation.
+  full      Large-excursion paper demonstration.
 """
 
 from __future__ import annotations
@@ -30,13 +35,15 @@ from std_msgs.msg import String
 
 PHASE_TOPIC = "/formation_control/experiment_phase"
 FORMATION_TOPIC = "/formation_control/desired_formation"
+MISSION_STATUS_TOPIC = "/formation_control/mission_status"
 
 
 class ThreeRobotExperimentRunner(Node):
-    def __init__(self, leader: str) -> None:
+    def __init__(self, leader: str, expected_followers: int = 2) -> None:
         super().__init__("three_robot_experiment_runner")
+        self.expected_followers = int(expected_followers)
 
-        formation_qos = QoSProfile(
+        transient_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
@@ -48,17 +55,16 @@ class ThreeRobotExperimentRunner(Node):
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.VOLATILE,
         )
-        phase_qos = QoSProfile(
-            history=HistoryPolicy.KEEP_LAST,
-            depth=1,
-            reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
-        )
 
         self.formation_pub = self.create_publisher(
             String,
             FORMATION_TOPIC,
-            formation_qos,
+            transient_qos,
+        )
+        self.mission_status_pub = self.create_publisher(
+            String,
+            MISSION_STATUS_TOPIC,
+            transient_qos,
         )
         self.cmd_vel_topic = f"/{leader}/formation_control/cmd_vel"
         self.cmd_vel_pub = self.create_publisher(
@@ -66,13 +72,20 @@ class ThreeRobotExperimentRunner(Node):
             self.cmd_vel_topic,
             command_qos,
         )
+
         self.phase: str | None = None
         self.create_subscription(
             String,
             PHASE_TOPIC,
             self._phase_callback,
-            phase_qos,
+            transient_qos,
         )
+
+    def publish_mission_status(self, status: str) -> None:
+        message = String()
+        message.data = status.strip().upper()
+        self.mission_status_pub.publish(message)
+        self.get_logger().info(f"MISSION_STATUS {message.data}")
 
     def _phase_callback(self, message: String) -> None:
         self.phase = message.data.strip().upper()
@@ -80,13 +93,17 @@ class ThreeRobotExperimentRunner(Node):
     def _spin_sleep(self, duration: float) -> None:
         deadline = time.monotonic() + duration
         while rclpy.ok() and time.monotonic() < deadline:
-            rclpy.spin_once(self, timeout_sec=min(0.05, deadline - time.monotonic()))
+            remaining = deadline - time.monotonic()
+            rclpy.spin_once(
+                self,
+                timeout_sec=min(0.05, remaining),
+            )
 
     def wait_for_phase(self, desired: str) -> None:
         desired = desired.upper()
         self.get_logger().info(
             f"Waiting for experiment phase {desired}. "
-            "You can arm/Offboard the robots now."
+            "Arm and switch all three robots to Offboard when ready."
         )
         while rclpy.ok() and self.phase != desired:
             rclpy.spin_once(self, timeout_sec=0.2)
@@ -98,12 +115,16 @@ class ThreeRobotExperimentRunner(Node):
         self.get_logger().info(
             "Waiting for both follower formation-command subscriptions."
         )
-        while rclpy.ok() and self.formation_pub.get_subscription_count() < 2:
+        while (
+            rclpy.ok()
+            and self.formation_pub.get_subscription_count()
+            < self.expected_followers
+        ):
             rclpy.spin_once(self, timeout_sec=0.2)
 
+        count = self.formation_pub.get_subscription_count()
         self.get_logger().info(
-            "Formation publisher sees "
-            f"{self.formation_pub.get_subscription_count()} subscriber(s)."
+            f"Formation publisher sees {count} subscriber(s)."
         )
 
         self.get_logger().info(
@@ -124,10 +145,10 @@ class ThreeRobotExperimentRunner(Node):
         rate_hz: float = 10.0,
     ) -> None:
         count = self.formation_pub.get_subscription_count()
-        if count < 2:
+        if count < self.expected_followers:
             raise RuntimeError(
                 "Formation command lost expected subscribers: "
-                f"found {count}, expected at least 2."
+                f"found {count}, expected at least {self.expected_followers}."
             )
 
         self.get_logger().info(
@@ -189,66 +210,131 @@ class ThreeRobotExperimentRunner(Node):
         self.get_logger().info(f"SETTLE {duration:.1f} s")
         self._spin_sleep(duration)
 
-    def run_sequence(self) -> None:
-        # Start from the known nominal geometry.
+    def run_cautious(self) -> None:
+        """Moderate first wet-test experiment."""
+        self.get_logger().info(
+            "=== CAUTIOUS THREE-ROBOT EXPERIMENT START ==="
+        )
+
         self.publish_formation("triangle_nominal")
         self.settle(8.0)
 
-        # Move the entire nominal formation forward in +y.
-        self.publish_velocity(0.0, 0.15, 0.0, duration=4.0)
+        # +0.60 m in pool-frame x.
+        self.publish_velocity(0.15, 0.0, 0.0, duration=4.0)
         self.settle(8.0)
 
-        # Increase horizontal footprint while remaining comfortably inside
-        # the centered workspace.
         self.publish_formation("triangle_wide")
         self.settle(12.0)
 
-        # Shift the full formation toward +x.
-        self.publish_velocity(0.10, 0.0, 0.0, duration=4.0)
+        # -0.40 m in pool-frame y.
+        self.publish_velocity(0.0, -0.10, 0.0, duration=4.0)
         self.settle(8.0)
 
-        # Exercise a modest vertical deformation.
         self.publish_formation("triangle_high")
         self.settle(12.0)
 
-        # Undo the earlier y translation.
-        self.publish_velocity(0.0, -0.15, 0.0, duration=4.0)
+        self.publish_velocity(-0.15, 0.0, 0.0, duration=4.0)
         self.settle(8.0)
 
-        # Return to nominal shape.
         self.publish_formation("triangle_nominal")
         self.settle(10.0)
 
-        # Approximately undo the x translation.
-        self.publish_velocity(-0.10, 0.0, 0.0, duration=4.0)
+        self.publish_velocity(0.0, 0.10, 0.0, duration=4.0)
         self.settle(10.0)
 
         self.stop_leader()
-        self.get_logger().info("EXPERIMENT COMPLETE.")
+        self.get_logger().info(
+            "=== CAUTIOUS THREE-ROBOT EXPERIMENT COMPLETE ==="
+        )
+
+    def run_full(self) -> None:
+        """Large-excursion paper demonstration."""
+        self.get_logger().info(
+            "=== FULL THREE-ROBOT EXPERIMENT START ==="
+        )
+
+        self.publish_formation("triangle_nominal")
+        self.settle(8.0)
+
+        # +1.40 m in pool-frame x.
+        self.publish_velocity(0.20, 0.0, 0.0, duration=7.0)
+        self.settle(8.0)
+
+        self.publish_formation("triangle_wide")
+        self.settle(12.0)
+
+        # Contract before the larger lateral maneuver.
+        self.publish_formation("triangle_compact")
+        self.settle(12.0)
+
+        # -0.70 m in pool-frame y.
+        self.publish_velocity(0.0, -0.14, 0.0, duration=5.0)
+        self.settle(8.0)
+
+        self.publish_formation("triangle_high")
+        self.settle(12.0)
+
+        self.publish_velocity(-0.20, 0.0, 0.0, duration=7.0)
+        self.settle(8.0)
+
+        self.publish_formation("triangle_nominal")
+        self.settle(10.0)
+
+        self.publish_velocity(0.0, 0.14, 0.0, duration=5.0)
+        self.settle(12.0)
+
+        self.stop_leader()
+        self.get_logger().info(
+            "=== FULL THREE-ROBOT EXPERIMENT COMPLETE ==="
+        )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--leader", default="itrl_rov_1")
+    parser.add_argument(
+        "--profile",
+        choices=("cautious", "full"),
+        default="cautious",
+    )
     args = parser.parse_args()
 
     rclpy.init()
     node = ThreeRobotExperimentRunner(args.leader)
+    node.publish_mission_status("WAITING")
 
     try:
         node.wait_for_phase("FORMATION")
         node.wait_for_subscribers()
-        node.run_sequence()
+
+        node.publish_mission_status("RUNNING")
+
+        # Give record_formation_experiment.py time to close initialization,
+        # observe RUNNING, and open RUN/mission/bag before the first command.
+        node._spin_sleep(1.0)
+
+        if args.profile == "cautious":
+            node.run_cautious()
+        else:
+            node.run_full()
+
+        node.publish_mission_status("COMPLETE")
+
     except KeyboardInterrupt:
-        node.get_logger().warn("Experiment interrupted; commanding zero velocity.")
+        node.publish_mission_status("ABORTED")
+        node.get_logger().warn(
+            "Experiment interrupted; commanding zero leader velocity."
+        )
         node.stop_leader()
     except Exception as error:
+        node.publish_mission_status("ABORTED")
         node.get_logger().error(f"Experiment aborted: {error}")
         node.stop_leader()
         raise
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":
