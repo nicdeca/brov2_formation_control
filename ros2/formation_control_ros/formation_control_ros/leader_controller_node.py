@@ -82,7 +82,8 @@ class LeaderControllerNode(Node):
             self.odometry_topic = (
                 f"/{self.robot_name}/fmu/out/vehicle_odometry"
                 if self.state_source == "px4"
-                else f"/mocap/{self.robot_name.lower()}/odom"
+                # else f"/mocap/{self.robot_name.lower()}/odom"
+                else f"/{self.robot_name.lower()}/odom"
             )
 
         self.dt = float(self.get_parameter("dt").value)

@@ -10,10 +10,10 @@ requires-python = ">=3.10"
 dependencies = [
     "matplotlib",
     "networkx",
-    "numpy",
+    "numpy>=1.22",
     "osqp",
     "qpsolvers",
-    "scipy",
+    "scipy>=1.11",
 ]
 [build-system]
 requires = ["uv_build>=0.9.13,<0.10.0"]

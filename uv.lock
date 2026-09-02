@@ -280,10 +280,10 @@ dev = [
 requires-dist = [
     { name = "matplotlib" },
     { name = "networkx" },
-    { name = "numpy" },
+    { name = "numpy", specifier = ">=1.22" },
     { name = "osqp" },
     { name = "qpsolvers" },
-    { name = "scipy" },
+    { name = "scipy", specifier = ">=1.11" },
 ]
 
 [package.metadata.requires-dev]

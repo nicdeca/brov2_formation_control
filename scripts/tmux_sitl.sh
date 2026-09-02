@@ -21,7 +21,7 @@ set -euo pipefail
 SESSION="brov2"
 ROS2_DIR="$HOME/brov2_formation_control/ros2"
 REPO_DIR="$HOME/brov2_formation_control"
-BROV2_DIR="$HOME"
+PX4_DIR="$HOME"
 QGC_DIR="$HOME/Desktop/BROV2/"
 AUTO_RUN="${AUTO_RUN:-0}"
 
@@ -61,16 +61,16 @@ tmux select-layout -t "$SESSION:formation" tiled
 send_cmd "$PANE_TL" "micro-xrce-dds-agent udp4 -p 8888"
 
 # --- Top-right: QGroundControl -----------------------------------------
-send_cmd "$PANE_TR" "cd $QGC_DIR && ls && ./QGroundControl-x86_64.AppImage"
+send_cmd "$PANE_TR" "cd $QGC_DIR && ./QGroundControl-x86_64.AppImage"
 
 # --- Mid-left: launch the 2-robot sim -----------------------------------
-send_cmd "$PANE_ML" "source install/setup.bash && ros2 launch formation_control_ros multi_bluerov2_sim.launch.py robot_count:=2 robot_1_name:=splash robot_2_name:=glub px4_dir:=$BROV2_DIR/PX4-Autopilot"
+send_cmd "$PANE_ML" "source install/setup.bash && ros2 launch formation_control_ros multi_bluerov2_sim.launch.py robot_count:=2 robot_1_name:=splash robot_2_name:=glub px4_dir:=$PX4_DIR/PX4-Autopilot"
 
 # --- Mid-right: launch the 2-robot experiment ---------------------------
 send_cmd "$PANE_MR" "source install/setup.bash && ros2 launch formation_control_ros two_robot_experiment.launch.py dry_run:=false leader_refernce_mode:=velocity workspace_barrier_enabled:=false workspace_adaptive:=false leader:=splash follower:=glub"
 
 # --- Bottom-left: run the experiment script -----------------------------
-send_cmd "$PANE_BL" "cd .. && python3 scripts/run_two_robot_experiment.py"
+send_cmd "$PANE_BL" "cd .. && python3 scripts/run_two_robot_experiment.py --profile cautious --leader splash"
 
 # --- Bottom-right: record the experiment ---------------------------------
 send_cmd "$PANE_BR" "source install/setup.bash && cd .. && scripts/record_formation_experiment.sh --name two_robot_experiment --robots splash,glub --edge glub:splash"
