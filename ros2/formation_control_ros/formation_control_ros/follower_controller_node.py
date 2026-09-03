@@ -135,13 +135,13 @@ class FollowerControllerNode(Node):
             self.self_odometry_topic = (
                 f"/{self.robot_name}/fmu/out/vehicle_odometry"
                 if self.state_source == "px4"
-                else f"/mocap/{self.robot_name.lower()}/odom"
+                else f"/mocap/{self.robot_name.lower()}/odom_ekf"
             )
         if not parent_odometry_topic:
             parent_odometry_topic = (
                 f"/{self.parent_robot_name}/fmu/out/vehicle_odometry"
                 if self.state_source == "px4"
-                else f"/mocap/{self.parent_robot_name.lower()}/odom"
+                else f"/mocap/{self.parent_robot_name.lower()}/odom_ekf"
             )
         self.parent_odometry_topic = parent_odometry_topic
 
