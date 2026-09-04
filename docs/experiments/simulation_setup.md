@@ -1,30 +1,17 @@
 # SITL simulation setup
 
-## 1. Pool-aligned Gazebo world
+This page documents the common Gazebo/PX4 setup and the two supported state
+paths:
 
-The current Marinarium worlds are re-anchored so that PX4 local NED matches the
-intended real-pool origin/orientation. The simulated tank remains approximately
-`7.4 x 4.55 x 2.55 m`; it was not scaled to the reported real-pool dimensions.
+1. direct PX4 `VehicleOdometry`;
+2. simulated MoCap pose + gyro passed through the same in-repository estimator
+   used in real experiments.
 
-Read `pool_coordinate_frame.md` before changing any absolute positions.
+## Common SITL setup
 
-## 2. Terminal 1 — Gazebo + PX4 SITL
+### Terminal 1 — Gazebo + PX4 SITL
 
-The canonical simulator launch is `multi_bluerov2_sim.launch.py`.
-
-Two robots with generic SITL names:
-
-```bash
-cd ~/discower_ws
-source /opt/ros/jazzy/setup.bash
-source ~/discower_ws/install/setup.bash
-
-ros2 launch formation_control_ros multi_bluerov2_sim.launch.py \
-  robot_count:=2 \
-  px4_dir:=/home/nicola/Gits/KTH-PX4/PX4-Autopilot
-```
-
-Two robots using hardware-like names:
+Two robots with physical names:
 
 ```bash
 ros2 launch formation_control_ros multi_bluerov2_sim.launch.py \
@@ -34,121 +21,210 @@ ros2 launch formation_control_ros multi_bluerov2_sim.launch.py \
   px4_dir:=/home/nicola/Gits/KTH-PX4/PX4-Autopilot
 ```
 
-Five robots:
+Three robots:
 
 ```bash
 ros2 launch formation_control_ros multi_bluerov2_sim.launch.py \
-  robot_count:=5 \
+  robot_count:=3 \
+  robot_1_name:=splash \
+  robot_2_name:=glub \
+  robot_3_name:=bubble \
   px4_dir:=/home/nicola/Gits/KTH-PX4/PX4-Autopilot
 ```
 
-`robot_1_name` ... `robot_6_name` control the PX4/ROS namespaces. The simulator
-also accepts `rov_1_pose` ... `rov_6_pose`, which are internal Gazebo ENU poses.
-Do not reinterpret those pose arguments as controller-core NWU coordinates.
+Using the physical names is intentional: the same controller, recorder, and
+mission commands can then be reused in the pool.
 
-## 3. Terminal 2 — Micro XRCE-DDS agent
+### Terminal 2 — Micro XRCE-DDS agent
 
 ```bash
 micro-xrce-dds-agent udp4 -p 8888
 ```
 
-## 4. QGroundControl and namespace check
+### QGroundControl
 
-Open one QGroundControl instance and verify every intended vehicle appears.
-Before arming, check that the ROS namespaces exactly match the simulator names:
+Before enabling actuation:
 
-```bash
-ros2 topic list | grep '/fmu/out/vehicle_odometry'
-```
+- confirm every intended vehicle appears;
+- confirm every vehicle can arm;
+- confirm Offboard becomes available;
+- verify QGC IDs correspond to the ROS namespaces;
+- verify PX4 odometry is alive.
 
-A common failure is to spawn `splash,bubble` while launching controllers for
-`splash,glub`; the second controller then has no PX4/offboard stream.
-
-Useful rate checks:
+Examples:
 
 ```bash
 ros2 topic hz /splash/fmu/out/vehicle_odometry
 ros2 topic hz /glub/fmu/out/vehicle_odometry
 ```
 
-If using generic names, substitute `itrl_rov_1`, `itrl_rov_2`, etc.
+---
 
-## 5. Verify the new pool coordinates
+# SITL mode A — direct PX4 state
 
-Before launching control, inspect one raw PX4 sample:
-
-```bash
-ros2 topic echo /splash/fmu/out/vehicle_odometry --once
-```
-
-For the first default spawn, the raw NED position should be of order
-
-```text
-x ~ 2.7 m, y ~ -1.0 m, z ~ 1.3 m
-```
-
-rather than the old `z ~ -95 m` world coordinates.
-
-## 6. Two-robot controller launch in SITL
-
-`two_robot_experiment.launch.py` defaults robot dynamics to `auto`. `auto` is
-for known physical names and must **not** be allowed to select real-hardware
-models in SITL. Pass the Gazebo configuration explicitly.
-
-With `splash` / `glub` namespaces:
+## Two robots
 
 ```bash
 ros2 launch formation_control_ros two_robot_experiment.launch.py \
-  dry_run:=false \
-  leader_reference_mode:=velocity \
+  dry_run:=true \
   leader:=splash \
   follower:=glub \
   leader_robot_configuration:=gazebo \
   follower_robot_configuration:=gazebo \
+  leader_reference_mode:=velocity \
+  state_source:=px4 \
   workspace_barrier_enabled:=true \
   workspace_adaptive:=true
 ```
 
-With generic namespaces, likewise pass both `*_robot_configuration:=gazebo`.
-
-## 7. Five-robot controller launch
+## Three robots
 
 ```bash
-ros2 launch formation_control_ros five_robot_tree_experiment.launch.py \
-  dry_run:=false \
+ros2 launch formation_control_ros three_robot_experiment.launch.py \
+  dry_run:=true \
+  leader:=splash \
+  follower_left:=glub \
+  follower_right:=bubble \
+  leader_robot_configuration:=gazebo \
+  follower_left_robot_configuration:=gazebo \
+  follower_right_robot_configuration:=gazebo \
+  leader_reference_mode:=velocity \
+  state_source:=px4 \
+  workspace_barrier_enabled:=true \
+  workspace_adaptive:=true
+```
+
+Because the names `splash`, `glub`, and `bubble` normally select physical
+dynamics in `auto` mode, the direct-PX4 SITL commands explicitly force
+`gazebo`.
+
+After checking state/frame/controller diagnostics, repeat with:
+
+```text
+dry_run:=false
+```
+
+---
+
+# SITL mode B — simulated MoCap + in-repository estimator
+
+This mode validates the same estimator/controller interface used in the pool.
+
+The simulated adapter creates:
+
+```text
+/mocap/<robot>/pose
+/mocap/<robot>/imu
+```
+
+from PX4 SITL state. The estimator then publishes:
+
+```text
+/mocap/<robot>/pose_core
+/mocap/<robot>/odom_ekf
+```
+
+with the fixed output contract:
+
+```text
+world = core NWU
+body  = FLU
+```
+
+## Two robots
+
+```bash
+ros2 launch formation_control_ros \
+  two_robot_experiment_with_ekf_sitl.launch.py \
+  leader:=splash \
+  follower:=glub \
+  dry_run:=true \
   leader_reference_mode:=velocity \
   workspace_barrier_enabled:=true \
   workspace_adaptive:=true
 ```
 
-The five-robot launch already fixes all controller dynamics to `gazebo`.
-
-Run the mission with:
+## Three robots
 
 ```bash
-python scripts/run_five_robot_tree_experiment.py \
-  --leader itrl_rov_1 \
-  --profile full
+ros2 launch formation_control_ros \
+  three_robot_experiment_with_ekf_sitl.launch.py \
+  leader:=splash \
+  follower_left:=glub \
+  follower_right:=bubble \
+  dry_run:=true \
+  leader_reference_mode:=velocity \
+  workspace_barrier_enabled:=true \
+  workspace_adaptive:=true
 ```
 
-The current five-robot runner uses wall time and does **not** expose a
-`--gazebo-timer` argument. The launch-level `gazebo_timer` option is therefore
-not part of the normal scripted five-robot workflow.
+The EKF-SITL wrappers force `gazebo` dynamics automatically.
 
-## 8. Adaptive two-robot SITL mission
+### Verify the estimator path
 
-Use the dedicated launch rather than changing the normal two-robot experiment:
+For example:
 
 ```bash
-ros2 launch formation_control_ros two_robot_adaptive_mission.launch.py \
-  dry_run:=false
+ros2 topic echo /mocap/glub/pose --once
+ros2 topic echo /mocap/glub/imu --once
+ros2 topic echo /mocap/glub/pose_core --once
+ros2 topic echo /mocap/glub/odom_ekf --once
 ```
 
-Then:
+Healthy simulated MoCap/EKF operation is intentionally quiet after startup.
+Warnings are printed only if a stream stalls, a measurement is rejected, or
+gyro fusion falls back.
+
+After the dry-run check, repeat with:
+
+```text
+dry_run:=false
+```
+
+---
+
+# What SITL with the estimator does and does not test
+
+The simulated MoCap pose and gyro are generated from PX4 SITL
+`VehicleOdometry`. Therefore this mode is useful for testing:
+
+- topic and namespace wiring;
+- PX4 NED/FRD -> core NWU/FLU conversion;
+- MoCap estimator initialization;
+- gyro fusion and angular-rate conventions;
+- controller/phase-manager use of `nav_msgs/Odometry`;
+- recorder/export/three-way comparison plumbing.
+
+It is **not** an independent estimator-performance benchmark because both the
+simulated sensor and PX4 comparison originate from the same SITL state.
+
+---
+
+# Recorder examples
+
+## PX4 state
 
 ```bash
-python scripts/run_two_robot_adaptive_mission.py --leader itrl_rov_1
+scripts/record_formation_experiment.sh \
+  --name two_robot_sitl_px4 \
+  --robots splash,glub \
+  --edge glub:splash \
+  --state-source px4
 ```
 
-For simulation-time scheduling, set `gazebo_timer:=true` in the launch and pass
-`--gazebo-timer` to this adaptive mission runner.
+## MoCap-estimator state in SITL
+
+```bash
+scripts/record_formation_experiment.sh \
+  --name two_robot_sitl_ekf \
+  --robots splash,glub \
+  --edge glub:splash \
+  --state-source nav_msgs \
+  --state-topic-template '/mocap/{robot}/odom_ekf' \
+  --mocap-world-frame core_nwu \
+  --odom-twist-frame body \
+  --imu-topic-template '/mocap/{robot}/imu'
+```
+
+The resulting estimator-comparison plots can contain PX4, estimator output,
+and transformed raw MoCap on the same axes.

@@ -43,6 +43,14 @@ setup(
                 "experiment_phase_manager = "
                 "formation_control_ros.experiment_phase_manager:main"
             ),
+            (
+                "mocap_odom_ekf = "
+                "formation_control_ros.mocap_odom_ekf:main"
+            ),
+            (
+                "simulated_mocap = "
+                "formation_control_ros.simulated_mocap:main"
+            ),
         ],
     },
 )

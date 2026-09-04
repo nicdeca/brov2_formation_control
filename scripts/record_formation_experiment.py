@@ -38,7 +38,26 @@ PHASE_TOPIC = "/formation_control/experiment_phase"
 MISSION_STATUS_TOPIC = "/formation_control/mission_status"
 
 
-def recorder_topics(robots: Sequence[str]) -> list[str]:
+def _expand_topic_template(template: str, robot: str) -> str:
+    return (
+        template.replace("{robot}", robot)
+        .replace("{robot_lower}", robot.lower())
+    )
+
+
+def _unique(values: Sequence[str]) -> list[str]:
+    return list(dict.fromkeys(values))
+
+
+def recorder_topics(
+    robots: Sequence[str],
+    *,
+    state_topic_template: str,
+    ekf_topic_template: str,
+    mocap_pose_topic_template: str,
+    mocap_core_pose_topic_template: str,
+    imu_topic_template: str,
+) -> list[str]:
     topics = [
         "/clock",
         PHASE_TOPIC,
@@ -50,7 +69,19 @@ def recorder_topics(robots: Sequence[str]) -> list[str]:
         prefix = f"/{robot}"
         topics.extend(
             [
+                # Always record PX4, raw MoCap, and the in-repository EKF so
+                # estimator comparisons are available regardless of which
+                # source drives the controller.
                 f"{prefix}/fmu/out/vehicle_odometry",
+                _expand_topic_template(mocap_pose_topic_template, robot),
+                _expand_topic_template(mocap_core_pose_topic_template, robot),
+                _expand_topic_template(ekf_topic_template, robot),
+                _expand_topic_template(state_topic_template, robot),
+                _expand_topic_template(imu_topic_template, robot),
+                # Also retain both common gyro sources when present so a run
+                # can diagnose estimator-rate problems after the fact.
+                f"/{robot}/mavros/imu/data",
+                f"/mocap/{robot}/imu",
                 f"{prefix}/fmu/out/vehicle_control_mode",
                 f"{prefix}/fmu/in/vehicle_thrust_setpoint",
                 f"{prefix}/fmu/in/vehicle_torque_setpoint",
@@ -73,7 +104,7 @@ def recorder_topics(robots: Sequence[str]) -> list[str]:
                 f"{prefix}/formation_control/workspace_minimum_physical_margin",
             ]
         )
-    return topics
+    return _unique(topics)
 
 
 class RosbagRecorder:
@@ -92,6 +123,7 @@ class RosbagRecorder:
             "record",
             "-o",
             str(self.bag_dir),
+            "--topics",
             *self.topics,
         ]
         print(f"Starting rosbag: {self.bag_dir}", flush=True)
@@ -189,10 +221,38 @@ def write_manifest(
     name: str,
     robots: Sequence[str],
     edges: Sequence[str],
+    state_source: str,
+    state_topic_template: str,
+    mocap_world_frame: str,
+    odom_twist_frame: str,
+    comparison_ekf_topic_template: str,
+    mocap_pose_topic_template: str,
+    mocap_core_pose_topic_template: str,
+    imu_topic_template: str,
 ) -> None:
     lines = [
-        "schema_version: 2",
+        "schema_version: 4",
         f'name: "{name}"',
+        f'state_source: "{state_source}"',
+        f'state_topic_template: "{state_topic_template}"',
+        f'mocap_world_frame: "{mocap_world_frame}"',
+        f'odom_twist_frame: "{odom_twist_frame}"',
+        (
+            'comparison_ekf_topic_template: '
+            f'"{comparison_ekf_topic_template}"'
+        ),
+        (
+            'mocap_pose_topic_template: '
+            f'"{mocap_pose_topic_template}"'
+        ),
+        (
+            'mocap_core_pose_topic_template: '
+            f'"{mocap_core_pose_topic_template}"'
+        ),
+        (
+            'comparison_imu_topic_template: '
+            f'"{imu_topic_template}"'
+        ),
         f'created_local: "{datetime.now().astimezone().isoformat(timespec="seconds")}"',
         "recording_layout: split_initialization_mission",
         "robots:",
@@ -242,6 +302,59 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--name", required=True)
     parser.add_argument(
+        "--state-source",
+        choices=("px4", "nav_msgs"),
+        default="px4",
+        help=(
+            "state source used by the controller; stored in the run manifest "
+            "so exported canonical trajectories match the online controller"
+        ),
+    )
+    parser.add_argument(
+        "--state-topic-template",
+        default="",
+        help=(
+            "per-robot controller state topic template using {robot} or "
+            "{robot_lower}; empty selects the source default"
+        ),
+    )
+    parser.add_argument(
+        "--mocap-world-frame",
+        default="core_nwu",
+        help="generic-Odometry world-frame convention stored in the manifest",
+    )
+    parser.add_argument(
+        "--odom-twist-frame",
+        default="body",
+        help="generic-Odometry twist-frame convention stored in the manifest",
+    )
+    parser.add_argument(
+        "--ekf-topic-template",
+        default="/mocap/{robot}/odom_ekf",
+        help="MoCap-EKF topic recorded for offline estimator comparison",
+    )
+    parser.add_argument(
+        "--mocap-pose-topic-template",
+        default="/mocap/{robot}/pose",
+        help="raw MoCap PoseStamped topic recorded for estimator diagnostics",
+    )
+    parser.add_argument(
+        "--mocap-core-pose-topic-template",
+        default="/mocap/{robot}/pose_core",
+        help=(
+            "transformed raw MoCap pose in core NWU/FLU, recorded for "
+            "three-way estimator comparison"
+        ),
+    )
+    parser.add_argument(
+        "--imu-topic-template",
+        default="/{robot}/mavros/imu/data",
+        help=(
+            "gyro/IMU topic associated with the MoCap estimator; the recorder "
+            "also retains the standard MAVROS and simulated-MoCap gyro topics"
+        ),
+    )
+    parser.add_argument(
         "--robots",
         required=True,
         help="comma-separated robot names",
@@ -279,6 +392,31 @@ def main() -> None:
                 f"edge {edge!r} references a robot not listed in --robots"
             )
 
+    state_topic_template = args.state_topic_template.strip()
+    if not state_topic_template:
+        state_topic_template = (
+            "/{robot}/fmu/out/vehicle_odometry"
+            if args.state_source == "px4"
+            else "/mocap/{robot}/odom_ekf"
+        )
+
+    templates = {
+        "state topic": state_topic_template,
+        "EKF topic": args.ekf_topic_template.strip(),
+        "MoCap pose topic": args.mocap_pose_topic_template.strip(),
+        "core MoCap pose topic": (
+            args.mocap_core_pose_topic_template.strip()
+        ),
+        "IMU topic": args.imu_topic_template.strip(),
+    }
+    if len(robots) > 1:
+        for label, template in templates.items():
+            if "{robot}" not in template and "{robot_lower}" not in template:
+                parser.error(
+                    f"{label} template must contain '{{robot}}' or "
+                    "'{robot_lower}' for a multi-robot recording"
+                )
+
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_root = args.output_root.expanduser().resolve()
     run_dir = (output_root / f"{stamp}_{args.name}").resolve()
@@ -288,9 +426,28 @@ def main() -> None:
         name=args.name,
         robots=robots,
         edges=args.edge,
+        state_source=args.state_source,
+        state_topic_template=state_topic_template,
+        mocap_world_frame=args.mocap_world_frame,
+        odom_twist_frame=args.odom_twist_frame,
+        comparison_ekf_topic_template=args.ekf_topic_template.strip(),
+        mocap_pose_topic_template=args.mocap_pose_topic_template.strip(),
+        mocap_core_pose_topic_template=(
+            args.mocap_core_pose_topic_template.strip()
+        ),
+        imu_topic_template=args.imu_topic_template.strip(),
     )
 
-    topics = recorder_topics(robots)
+    topics = recorder_topics(
+        robots,
+        state_topic_template=state_topic_template,
+        ekf_topic_template=args.ekf_topic_template.strip(),
+        mocap_pose_topic_template=args.mocap_pose_topic_template.strip(),
+        mocap_core_pose_topic_template=(
+            args.mocap_core_pose_topic_template.strip()
+        ),
+        imu_topic_template=args.imu_topic_template.strip(),
+    )
     initialization = RosbagRecorder(
         run_dir / "initialization" / "bag",
         topics,
@@ -305,6 +462,14 @@ def main() -> None:
     print(f"Mission folder: {(run_dir / 'mission').resolve()}")
     print(f"Robots: {', '.join(robots)}")
     print(f"Edges: {', '.join(args.edge) if args.edge else '(none)'}")
+    print(f"Controller state source: {args.state_source}")
+    print(f"Controller state topic: {state_topic_template}")
+    print(f"Comparison EKF topic: {args.ekf_topic_template.strip()}")
+    print(
+        "Core MoCap pose topic: "
+        f"{args.mocap_core_pose_topic_template.strip()}"
+    )
+    print(f"IMU topic: {args.imu_topic_template.strip()}")
     print(f"Recording {len(topics)} explicit topics.")
     print("Start this recorder before arming. Ctrl-C is always safe.")
 
@@ -349,7 +514,8 @@ def main() -> None:
         initialization.stop()
         mission.stop()
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
     if not args.no_postprocess:
         run_postprocessing(run_dir, mission_exists=mission_started)
