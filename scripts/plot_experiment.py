@@ -46,7 +46,15 @@ def main() -> None:
         "--format",
         choices=("pdf", "png", "svg"),
         default="pdf",
-        help="mission figure format; default: pdf",
+        help="figure format for mission and estimator-comparison plots",
+    )
+    parser.add_argument(
+        "--no-estimator-comparison",
+        action="store_true",
+        help=(
+            "skip PX4-vs-MoCap-EKF comparison plots even when both "
+            "estimator histories were exported"
+        ),
     )
     args = parser.parse_args()
 
@@ -57,6 +65,7 @@ def main() -> None:
     scripts_dir = Path(__file__).resolve().parent
     initialization_plotter = scripts_dir / "plot_initialization_experiment.py"
     mission_plotter = scripts_dir / "plot_formation_experiment.py"
+    estimator_plotter = scripts_dir / "plot_state_estimator_comparison.py"
 
     requested = (
         ("initialization", "mission")
@@ -109,6 +118,21 @@ def main() -> None:
                 command.append("--show-legends")
 
         _run(command, f"Plot {phase}")
+
+        if not args.no_estimator_comparison:
+            comparison_command = [
+                sys.executable,
+                str(estimator_plotter),
+                str(history),
+                "--save",
+                "--format",
+                args.format,
+            ]
+            _run(
+                comparison_command,
+                f"Compare state estimators ({phase})",
+            )
+
         plotted.append(phase)
 
     if not plotted:

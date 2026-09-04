@@ -494,6 +494,7 @@ def _build_legacy_data(
 
     return {
         "arrays": arrays,
+        "metadata": history.metadata,
         "robots": robots,
         "robot_index": robot_index,
         "graph": graph,
@@ -1972,6 +1973,15 @@ def _print_summary(data: dict[str, object]) -> None:
     times = np.asarray(arrays["times"], dtype=float)
 
     print(f"Run duration: {times[-1]:.3f} s")
+    print(
+        "Controller state source: "
+        f"{data.get('metadata', {}).get('state_source', 'px4')}"
+    )
+    if "state_topic_template" in data.get("metadata", {}):
+        print(
+            "Controller state topic: "
+            f"{data['metadata']['state_topic_template']}"
+        )
     print(f"Robots: {', '.join(robots)}")
     print(
         "Edges: "
