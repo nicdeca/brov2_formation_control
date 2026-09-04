@@ -468,6 +468,15 @@ def print_summary(
 
     print("Initialization summary")
     print(f"Duration: {float(arrays['times'][-1]):.3f} s")
+    print(
+        "Controller state source: "
+        f"{history.metadata.get('state_source', 'px4')}"
+    )
+    if "state_topic_template" in history.metadata:
+        print(
+            "Controller state topic: "
+            f"{history.metadata['state_topic_template']}"
+        )
 
     for agent, robot in enumerate(robots):
         pieces = [robot]

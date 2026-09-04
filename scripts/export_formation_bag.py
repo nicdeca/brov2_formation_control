@@ -189,6 +189,268 @@ def px4_time_seconds(message) -> float | None:
     return None
 
 
+
+def _expand_topic_template(template: str, robot: str) -> str:
+    return (
+        str(template)
+        .replace("{robot}", robot)
+        .replace("{robot_lower}", robot.lower())
+    )
+
+
+def _state_configuration_from_manifest(
+    manifest: dict[str, Any],
+) -> tuple[str, str, str, str, str, str]:
+    """Return selected source/topic/frame settings with legacy PX4 defaults."""
+    state_source = str(manifest.get("state_source", "px4")).strip().lower()
+    if state_source not in ("px4", "nav_msgs"):
+        raise ValueError(
+            "run manifest state_source must be 'px4' or 'nav_msgs', "
+            f"got {state_source!r}"
+        )
+
+    state_topic_template = str(
+        manifest.get("state_topic_template", "")
+    ).strip()
+    if not state_topic_template:
+        state_topic_template = (
+            "/{robot}/fmu/out/vehicle_odometry"
+            if state_source == "px4"
+            else "/mocap/{robot}/odom_ekf"
+        )
+
+    mocap_world_frame = str(
+        manifest.get("mocap_world_frame", "core_nwu")
+    ).strip()
+    odom_twist_frame = str(
+        manifest.get("odom_twist_frame", "body")
+    ).strip()
+    ekf_topic_template = str(
+        manifest.get(
+            "comparison_ekf_topic_template",
+            "/mocap/{robot}/odom_ekf",
+        )
+    ).strip()
+    mocap_core_pose_topic_template = str(
+        manifest.get(
+            "mocap_core_pose_topic_template",
+            "/mocap/{robot}/pose_core",
+        )
+    ).strip()
+
+    return (
+        state_source,
+        state_topic_template,
+        mocap_world_frame,
+        odom_twist_frame,
+        ekf_topic_template,
+        mocap_core_pose_topic_template,
+    )
+
+
+def nav_odometry_to_core(
+    message,
+    *,
+    world_frame: str,
+    twist_frame: str,
+) -> dict[str, np.ndarray]:
+    """Convert generic Odometry exactly through the online ROS adapter."""
+    try:
+        from formation_control_ros.frame_conventions import FrameConvention
+        from formation_control_ros.state_adapter import odometry_to_core_state
+    except ImportError as error:
+        raise SystemExit(
+            "formation_control_ros is unavailable. Source the ROS workspace "
+            "before exporting a run that uses nav_msgs/Odometry."
+        ) from error
+
+    state = np.asarray(
+        odometry_to_core_state(
+            message,
+            FrameConvention(
+                world_frame=world_frame,
+                twist_frame=twist_frame,
+            ),
+        ),
+        dtype=float,
+    )
+    if state.shape != (13,):
+        raise ValueError(
+            "odometry_to_core_state returned unexpected state shape "
+            f"{state.shape}; expected (13,)"
+        )
+    return {
+        "position": state[0:3].copy(),
+        "quaternion": state[3:7].copy(),
+        "linear_velocity_body": state[7:10].copy(),
+        "angular_velocity_body": state[10:13].copy(),
+    }
+
+
+
+
+def core_pose_message_to_core(message) -> dict[str, np.ndarray]:
+    """Convert transformed core-NWU/FLU PoseStamped to canonical arrays."""
+    position = np.array(
+        [
+            message.pose.position.x,
+            message.pose.position.y,
+            message.pose.position.z,
+        ],
+        dtype=float,
+    )
+    q_xyzw = np.array(
+        [
+            message.pose.orientation.x,
+            message.pose.orientation.y,
+            message.pose.orientation.z,
+            message.pose.orientation.w,
+        ],
+        dtype=float,
+    )
+    norm = float(np.linalg.norm(q_xyzw))
+    if (
+        not np.all(np.isfinite(position))
+        or not np.all(np.isfinite(q_xyzw))
+        or norm <= 1e-12
+    ):
+        raise ValueError("invalid transformed raw MoCap pose")
+    q_xyzw /= norm
+    # Exported/core quaternion convention is scalar-first [w,x,y,z].
+    quaternion = np.array(
+        [q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2]],
+        dtype=float,
+    )
+    if quaternion[0] < 0.0:
+        quaternion = -quaternion
+    return {
+        "position": position,
+        "quaternion": quaternion,
+    }
+
+
+def _rotation_log_vector(rotation: np.ndarray) -> np.ndarray:
+    """SO(3) logarithm as a rotation vector."""
+    r = np.asarray(rotation, dtype=float)
+    cosine = float(np.clip((np.trace(r) - 1.0) * 0.5, -1.0, 1.0))
+    angle = float(np.arccos(cosine))
+    vee = np.array(
+        [
+            r[2, 1] - r[1, 2],
+            r[0, 2] - r[2, 0],
+            r[1, 0] - r[0, 1],
+        ],
+        dtype=float,
+    )
+    if angle < 1e-8:
+        return 0.5 * vee
+    sine = float(np.sin(angle))
+    if abs(sine) < 1e-8:
+        # Rare near-pi case; eigenvector is more stable.
+        values, vectors = np.linalg.eig(r)
+        index = int(np.argmin(np.abs(values - 1.0)))
+        axis = np.real(vectors[:, index])
+        axis /= max(float(np.linalg.norm(axis)), 1e-12)
+        return axis * angle
+    return (0.5 * angle / sine) * vee
+
+
+def finite_difference_mocap_twist(
+    times: np.ndarray,
+    positions: np.ndarray,
+    quaternions: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Diagnostic body-FLU twist from raw MoCap pose finite differences.
+
+    This is intentionally labeled as a finite-difference diagnostic. It is not
+    treated as a measured twist and is not used by the controller.
+    """
+    times = np.asarray(times, dtype=float)
+    positions = np.asarray(positions, dtype=float)
+    quaternions = np.asarray(quaternions, dtype=float)
+    linear_body = np.full(positions.shape, np.nan)
+    angular_body = np.full(positions.shape, np.nan)
+
+    n_samples, n_agents, _ = positions.shape
+    for agent in range(n_agents):
+        for index in range(n_samples):
+            left = max(0, index - 1)
+            right = min(n_samples - 1, index + 1)
+            if left == right:
+                continue
+            dt = float(times[right] - times[left])
+            if not np.isfinite(dt) or dt <= 1e-6:
+                continue
+
+            required = (
+                np.all(np.isfinite(positions[[left, right], agent]))
+                and np.all(
+                    np.isfinite(
+                        quaternions[[left, index, right], agent]
+                    )
+                )
+            )
+            if not required:
+                continue
+
+            q_current = quaternions[index, agent]
+            r_current = quaternion_to_matrix(q_current)
+            velocity_world = (
+                positions[right, agent] - positions[left, agent]
+            ) / dt
+            linear_body[index, agent] = (
+                r_current.T @ velocity_world
+            )
+
+            r_left = quaternion_to_matrix(
+                quaternions[left, agent]
+            )
+            r_right = quaternion_to_matrix(
+                quaternions[right, agent]
+            )
+            # World-frame increment, then express omega in current FLU body.
+            rotation_increment = r_right @ r_left.T
+            omega_world = (
+                _rotation_log_vector(rotation_increment) / dt
+            )
+            angular_body[index, agent] = (
+                r_current.T @ omega_world
+            )
+
+    return linear_body, angular_body
+
+def _convert_selected_state(
+    message,
+    *,
+    state_source: str,
+    world_frame: str,
+    twist_frame: str,
+) -> dict[str, np.ndarray]:
+    if state_source == "px4":
+        return px4_odometry_to_core(message)
+    return nav_odometry_to_core(
+        message,
+        world_frame=world_frame,
+        twist_frame=twist_frame,
+    )
+
+
+def _fill_state_arrays(
+    state: dict[str, np.ndarray],
+    *,
+    step: int,
+    agent: int,
+    positions: np.ndarray,
+    quaternions: np.ndarray,
+    linear_velocity_body: np.ndarray,
+    angular_velocity_body: np.ndarray,
+) -> None:
+    positions[step, agent] = state["position"]
+    quaternions[step, agent] = state["quaternion"]
+    linear_velocity_body[step, agent] = state["linear_velocity_body"]
+    angular_velocity_body[step, agent] = state["angular_velocity_body"]
+
+
 def storage_identifier(bag_dir: Path) -> str:
     with (bag_dir / "metadata.yaml").open("r", encoding="utf-8") as stream:
         metadata = yaml.safe_load(stream)
@@ -285,6 +547,14 @@ def main() -> None:
     manifest = load_manifest(run_dir)
     robots = [str(robot) for robot in manifest["robots"]]
     edges = list(manifest.get("edges", []))
+    (
+        state_source,
+        state_topic_template,
+        mocap_world_frame,
+        odom_twist_frame,
+        ekf_topic_template,
+        mocap_core_pose_topic_template,
+    ) = _state_configuration_from_manifest(manifest)
 
     if args.phase is not None:
         phase_name = args.phase
@@ -309,8 +579,23 @@ def main() -> None:
     diagnostic_topics = {
         robot: f"/{robot}/formation_control/diagnostic_snapshot" for robot in robots
     }
-    odometry_topics = {
+    selected_odometry_topics = {
+        robot: _expand_topic_template(state_topic_template, robot)
+        for robot in robots
+    }
+    px4_odometry_topics = {
         robot: f"/{robot}/fmu/out/vehicle_odometry" for robot in robots
+    }
+    ekf_odometry_topics = {
+        robot: _expand_topic_template(ekf_topic_template, robot)
+        for robot in robots
+    }
+    mocap_core_pose_topics = {
+        robot: _expand_topic_template(
+            mocap_core_pose_topic_template,
+            robot,
+        )
+        for robot in robots
     }
     thrust_topics = {
         robot: f"/{robot}/fmu/in/vehicle_thrust_setpoint" for robot in robots
@@ -351,8 +636,10 @@ def main() -> None:
     valid_bag_stamps: list[int] = []
     for bag_stamp, _ in reference_diagnostics.records:
         if any(
-            odometry_topics[robot] not in bag
-            or bag[odometry_topics[robot]].nearest(bag_stamp, max_delta_ns) is None
+            selected_odometry_topics[robot] not in bag
+            or bag[selected_odometry_topics[robot]].nearest(
+                bag_stamp, max_delta_ns
+            ) is None
             for robot in robots
         ):
             continue
@@ -374,6 +661,25 @@ def main() -> None:
     quaternions = np.full((n_samples, n_agents, 4), np.nan)
     linear_velocity_body = np.full((n_samples, n_agents, 3), np.nan)
     angular_velocity_body = np.full((n_samples, n_agents, 3), np.nan)
+
+    # Parallel estimator histories on the same controller synchronization grid.
+    # Standard plots use the canonical arrays above, which correspond to the
+    # state source selected in the run manifest.
+    px4_positions = np.full((n_samples, n_agents, 3), np.nan)
+    px4_quaternions = np.full((n_samples, n_agents, 4), np.nan)
+    px4_linear_velocity_body = np.full((n_samples, n_agents, 3), np.nan)
+    px4_angular_velocity_body = np.full((n_samples, n_agents, 3), np.nan)
+
+    ekf_positions = np.full((n_samples, n_agents, 3), np.nan)
+    ekf_quaternions = np.full((n_samples, n_agents, 4), np.nan)
+    ekf_linear_velocity_body = np.full((n_samples, n_agents, 3), np.nan)
+    ekf_angular_velocity_body = np.full((n_samples, n_agents, 3), np.nan)
+
+    # Raw MoCap after the estimator's explicit input-frame transform. These
+    # arrays are direct pose measurements in core NWU / FLU.
+    mocap_positions = np.full((n_samples, n_agents, 3), np.nan)
+    mocap_quaternions = np.full((n_samples, n_agents, 4), np.nan)
+
     px4_thrust_setpoint = np.full((n_samples, n_agents, 3), np.nan)
     px4_torque_setpoint = np.full((n_samples, n_agents, 3), np.nan)
     px4_armed = np.full((n_samples, n_agents), np.nan)
@@ -392,21 +698,87 @@ def main() -> None:
 
     for step, bag_stamp in enumerate(valid_bag_stamps):
         for agent, robot in enumerate(robots):
-            odom_msg = bag[odometry_topics[robot]].nearest(
+            selected_msg = bag[selected_odometry_topics[robot]].nearest(
                 bag_stamp,
                 max_delta_ns,
             )
-            assert odom_msg is not None
-            state = px4_odometry_to_core(odom_msg)
-            positions[step, agent] = state["position"]
-            quaternions[step, agent] = state["quaternion"]
-            linear_velocity_body[step, agent] = state["linear_velocity_body"]
-            angular_velocity_body[step, agent] = state["angular_velocity_body"]
+            assert selected_msg is not None
+            selected_state = _convert_selected_state(
+                selected_msg,
+                state_source=state_source,
+                world_frame=mocap_world_frame,
+                twist_frame=odom_twist_frame,
+            )
+            _fill_state_arrays(
+                selected_state,
+                step=step,
+                agent=agent,
+                positions=positions,
+                quaternions=quaternions,
+                linear_velocity_body=linear_velocity_body,
+                angular_velocity_body=angular_velocity_body,
+            )
 
-            if robot == reference_robot:
-                px4_time = px4_time_seconds(odom_msg)
-                if px4_time is not None:
-                    reference_px4_times[step] = px4_time
+            px4_series = bag.get(px4_odometry_topics[robot])
+            if px4_series is not None:
+                px4_msg = px4_series.nearest(bag_stamp, max_delta_ns)
+                if px4_msg is not None:
+                    px4_state = px4_odometry_to_core(px4_msg)
+                    _fill_state_arrays(
+                        px4_state,
+                        step=step,
+                        agent=agent,
+                        positions=px4_positions,
+                        quaternions=px4_quaternions,
+                        linear_velocity_body=px4_linear_velocity_body,
+                        angular_velocity_body=px4_angular_velocity_body,
+                    )
+                    if robot == reference_robot and state_source == "px4":
+                        px4_time = px4_time_seconds(px4_msg)
+                        if px4_time is not None:
+                            reference_px4_times[step] = px4_time
+
+            ekf_series = bag.get(ekf_odometry_topics[robot])
+            if ekf_series is not None:
+                ekf_msg = ekf_series.nearest(bag_stamp, max_delta_ns)
+                if ekf_msg is not None:
+                    ekf_state = nav_odometry_to_core(
+                        ekf_msg,
+                        world_frame=mocap_world_frame,
+                        twist_frame=odom_twist_frame,
+                    )
+                    _fill_state_arrays(
+                        ekf_state,
+                        step=step,
+                        agent=agent,
+                        positions=ekf_positions,
+                        quaternions=ekf_quaternions,
+                        linear_velocity_body=ekf_linear_velocity_body,
+                        angular_velocity_body=ekf_angular_velocity_body,
+                    )
+
+            mocap_series = bag.get(
+                mocap_core_pose_topics[robot]
+            )
+            if mocap_series is not None:
+                mocap_msg = mocap_series.nearest(
+                    bag_stamp,
+                    max_delta_ns,
+                )
+                if mocap_msg is not None:
+                    try:
+                        mocap_state = core_pose_message_to_core(
+                            mocap_msg
+                        )
+                    except ValueError:
+                        pass
+                    else:
+                        mocap_positions[step, agent] = (
+                            mocap_state["position"]
+                        )
+                        mocap_quaternions[step, agent] = (
+                            mocap_state["quaternion"]
+                        )
 
             diag_series = bag.get(diagnostic_topics[robot])
             if diag_series is not None:
@@ -472,6 +844,17 @@ def main() -> None:
     linear_velocity_body = linear_velocity_body[finite_control_mask]
     angular_velocity_body = angular_velocity_body[finite_control_mask]
 
+    px4_positions = px4_positions[finite_control_mask]
+    px4_quaternions = px4_quaternions[finite_control_mask]
+    px4_linear_velocity_body = px4_linear_velocity_body[finite_control_mask]
+    px4_angular_velocity_body = px4_angular_velocity_body[finite_control_mask]
+    ekf_positions = ekf_positions[finite_control_mask]
+    ekf_quaternions = ekf_quaternions[finite_control_mask]
+    ekf_linear_velocity_body = ekf_linear_velocity_body[finite_control_mask]
+    ekf_angular_velocity_body = ekf_angular_velocity_body[finite_control_mask]
+    mocap_positions = mocap_positions[finite_control_mask]
+    mocap_quaternions = mocap_quaternions[finite_control_mask]
+
     px4_thrust_setpoint = px4_thrust_setpoint[finite_control_mask]
     px4_torque_setpoint = px4_torque_setpoint[finite_control_mask]
     px4_armed = px4_armed[finite_control_mask]
@@ -490,8 +873,10 @@ def main() -> None:
 
     # Prefer PX4's simulation/sample clock. Fall back to rosbag receive time if
     # PX4 timestamps are unavailable or non-monotone.
-    if np.all(np.isfinite(reference_px4_times)) and np.all(
-        np.diff(reference_px4_times) > 0.0
+    if (
+        state_source == "px4"
+        and np.all(np.isfinite(reference_px4_times))
+        and np.all(np.diff(reference_px4_times) > 0.0)
     ):
         times = reference_px4_times - reference_px4_times[0]
         time_source = "px4_timestamp"
@@ -500,6 +885,14 @@ def main() -> None:
         times = (stamps - stamps[0]) * 1e-9
         time_source = "rosbag_receive_timestamp"
 
+    mocap_linear_velocity_body, mocap_angular_velocity_body = (
+        finite_difference_mocap_twist(
+            np.asarray(times, dtype=float),
+            mocap_positions,
+            mocap_quaternions,
+        )
+    )
+
     arrays = {
         "times": np.asarray(times, dtype=float),
         "bag_timestamps_ns": np.asarray(valid_bag_stamps, dtype=np.int64),
@@ -507,6 +900,18 @@ def main() -> None:
         "quaternions": quaternions,
         "linear_velocity_body": linear_velocity_body,
         "angular_velocity_body": angular_velocity_body,
+        "px4_positions": px4_positions,
+        "px4_quaternions": px4_quaternions,
+        "px4_linear_velocity_body": px4_linear_velocity_body,
+        "px4_angular_velocity_body": px4_angular_velocity_body,
+        "ekf_positions": ekf_positions,
+        "ekf_quaternions": ekf_quaternions,
+        "ekf_linear_velocity_body": ekf_linear_velocity_body,
+        "ekf_angular_velocity_body": ekf_angular_velocity_body,
+        "mocap_positions": mocap_positions,
+        "mocap_quaternions": mocap_quaternions,
+        "mocap_linear_velocity_body_fd": mocap_linear_velocity_body,
+        "mocap_angular_velocity_body_fd": mocap_angular_velocity_body,
         "px4_thrust_setpoint": px4_thrust_setpoint,
         "px4_torque_setpoint": px4_torque_setpoint,
         "px4_armed": px4_armed,
@@ -522,6 +927,15 @@ def main() -> None:
         "recording_phase": phase_name,
         "max_sync_ms": float(args.max_sync_ms),
         "time_source": time_source,
+        "state_source": state_source,
+        "state_topic_template": state_topic_template,
+        "mocap_world_frame": mocap_world_frame,
+        "odom_twist_frame": odom_twist_frame,
+        "comparison_ekf_topic_template": ekf_topic_template,
+        "mocap_core_pose_topic_template": (
+            mocap_core_pose_topic_template
+        ),
+        "mocap_twist_source": "finite_difference_of_core_pose",
     }
 
     output = (args.output or phase_dir / "formation_history.npz").expanduser().resolve()
@@ -532,6 +946,8 @@ def main() -> None:
     print(f"Recording phase: {phase_name}")
     print(f"Duration: {times[-1]:.3f} s")
     print(f"Time source: {time_source}")
+    print(f"Controller state source: {state_source}")
+    print(f"Controller state topic: {state_topic_template}")
     print(f"History: {output}")
     print(f"Absolute output folder: {output.parent}")
 
