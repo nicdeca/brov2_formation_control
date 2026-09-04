@@ -4,14 +4,20 @@
 For each robot:
 
     PX4 VehicleOdometry (NED/FRD)
-        -> formation_control_ros state adapter
-        -> PoseStamped in core NWU / FLU
-        -> Imu angular velocity in body FLU
+        -> formation_control_ros state adapter (core NWU / FLU)
+        -> convert back to the laboratory MoCap convention
+        -> PoseStamped in NED / FRD
+        -> Imu angular velocity in body FRD
 
 Default outputs:
 
     /mocap/<robot>/pose
     /mocap/<robot>/imu
+
+The simulated raw MoCap convention intentionally matches the laboratory
+MoCap convention discovered during wet testing: NED world and FRD rigid body.
+This forces SITL to exercise exactly the same estimator input-frame conversion
+as the real experiment.
 
 This is a software-path validator, not an independent ground-truth sensor.
 """
@@ -60,10 +66,10 @@ class SimulatedMocapNode(Node):
             "output_imu_topic_template",
             "/mocap/{robot}/imu",
         )
-        self.declare_parameter("pose_frame_id", "core_nwu")
+        self.declare_parameter("pose_frame_id", "mocap_ned")
         self.declare_parameter(
             "imu_frame_id_template",
-            "{robot}/base_link",
+            "{robot}/base_link_frd",
         )
         self.declare_parameter("status_period_sec", 2.0)
 
@@ -190,17 +196,33 @@ class SimulatedMocapNode(Node):
 
             stamp = self.get_clock().now().to_msg()
 
+            # The trusted state adapter gives core NWU / FLU.  Convert the
+            # simulated sensor output back to the laboratory raw convention:
+            #
+            #   p_NED = S p_NWU
+            #   R_NED<-FRD = S R_NWU<-FLU S
+            #
+            # with S = diag(1,-1,-1).  Quaternion similarity by the same
+            # Rx(pi) rotation leaves w,x unchanged and flips y,z.
+            position_ned = np.array(
+                [state[0], -state[1], -state[2]],
+                dtype=float,
+            )
+            quaternion_ned_frd = np.array(
+                [state[3], state[4], -state[5], -state[6]],
+                dtype=float,
+            )  # scalar-first [w,x,y,z]
+
             pose = PoseStamped()
             pose.header.stamp = stamp
             pose.header.frame_id = self._pose_frame
-            pose.pose.position.x = float(state[0])
-            pose.pose.position.y = float(state[1])
-            pose.pose.position.z = float(state[2])
-            # state adapter quaternion is scalar-first [w,x,y,z].
-            pose.pose.orientation.w = float(state[3])
-            pose.pose.orientation.x = float(state[4])
-            pose.pose.orientation.y = float(state[5])
-            pose.pose.orientation.z = float(state[6])
+            pose.pose.position.x = float(position_ned[0])
+            pose.pose.position.y = float(position_ned[1])
+            pose.pose.position.z = float(position_ned[2])
+            pose.pose.orientation.w = float(quaternion_ned_frd[0])
+            pose.pose.orientation.x = float(quaternion_ned_frd[1])
+            pose.pose.orientation.y = float(quaternion_ned_frd[2])
+            pose.pose.orientation.z = float(quaternion_ned_frd[3])
             self._pose_publishers[robot].publish(pose)
 
             imu = Imu()
@@ -211,9 +233,12 @@ class SimulatedMocapNode(Node):
             )
             imu.orientation_covariance[0] = -1.0
             imu.linear_acceleration_covariance[0] = -1.0
+            # Pseudo-gyro follows the same FRD body convention as the raw
+            # simulated MoCap rigid body, so the SITL estimator exercises its
+            # FRD -> FLU gyro conversion as well.
             imu.angular_velocity.x = float(state[10])
-            imu.angular_velocity.y = float(state[11])
-            imu.angular_velocity.z = float(state[12])
+            imu.angular_velocity.y = float(-state[11])
+            imu.angular_velocity.z = float(-state[12])
             # SITL pseudo-gyro: small nominal covariance; this field is only
             # diagnostic because estimator tuning is parameterized separately.
             variance = 1e-4

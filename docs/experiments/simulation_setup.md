@@ -113,11 +113,12 @@ This mode validates the same estimator/controller interface used in the pool.
 The simulated adapter creates:
 
 ```text
-/mocap/<robot>/pose
-/mocap/<robot>/imu
+/mocap/<robot>/pose   # raw NED world / FRD body, matching the lab MoCap
+/mocap/<robot>/imu    # pseudo gyro in FRD for SITL frame-path validation
 ```
 
-from PX4 SITL state. The estimator then publishes:
+from PX4 SITL state. The estimator applies the same NED/FRD -> NWU/FLU
+conversion used in the pool and then publishes:
 
 ```text
 /mocap/<robot>/pose_core
@@ -186,7 +187,9 @@ dry_run:=false
 # What SITL with the estimator does and does not test
 
 The simulated MoCap pose and gyro are generated from PX4 SITL
-`VehicleOdometry`. Therefore this mode is useful for testing:
+`VehicleOdometry`, but are intentionally republished in the laboratory raw
+NED/FRD convention before entering the estimator. Therefore this mode is useful
+for testing:
 
 - topic and namespace wiring;
 - PX4 NED/FRD -> core NWU/FLU conversion;

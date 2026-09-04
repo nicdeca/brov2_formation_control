@@ -67,10 +67,14 @@ differ from the controller in:
 ### World-frame modes
 
 ```text
+input_world_frame:=ned       # laboratory default
 input_world_frame:=core_nwu
 input_world_frame:=ros_enu
 input_world_frame:=custom
 ```
+
+`ned` is the maintained laboratory default and applies
+`diag(1,-1,-1)` to map the raw MoCap world into core NWU.
 
 `core_nwu` means that the incoming position/quaternion already use the
 pool-aligned core frame.
@@ -104,8 +108,8 @@ alone cannot fix an origin offset.
 ### Incoming body-frame modes
 
 ```text
+input_body_frame:=frd        # laboratory default
 input_body_frame:=flu
-input_body_frame:=frd
 input_body_frame:=custom
 ```
 
@@ -280,6 +284,19 @@ max_position_innovation_m:=0.50
 
 Linear velocity is estimated in core-NWU and rotated to body FLU for the
 published Odometry.
+
+## Maintained laboratory raw convention
+
+Wet testing established the raw MoCap convention as
+
+```text
+world = NED
+body  = FRD
+```
+
+These are now the defaults both in the estimator and in the hardware EKF
+wrappers.  The simulated MoCap publishes the same raw convention, so the SITL
+and hardware estimator paths exercise the identical frame conversion.
 
 ## Hardware launch
 

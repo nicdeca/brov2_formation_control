@@ -1,8 +1,9 @@
 """Two-BlueROV formation experiment with selectable state input.
 
-The state source and per-robot topic are launch arguments, allowing the same
-experiment to compare PX4 VehicleOdometry against a generic nav_msgs/Odometry
-estimator without changing controller code.
+All controller-facing states use the project core convention (NWU world, FLU
+body).  The absolute initialization depth is exposed as ``initialization_z``
+so wet experiments can be kept inside the reliable MoCap volume without
+editing controller code.
 """
 
 from launch import LaunchDescription
@@ -14,9 +15,10 @@ from launch_ros.actions import Node
 PHASE_TOPIC = "/formation_control/experiment_phase"
 FORMATION_TOPIC = "/formation_control/desired_formation"
 
-# Pool-aligned core-NWU initialization geometry.
-INITIAL_LEADER_POSITION = [2.675, 0.050, -0.775]
-INITIAL_FOLLOWER_POSITION = [4.475, 0.750, -0.775]
+# Pool-aligned core-NWU horizontal initialization geometry.  The z coordinate
+# is resolved from the initialization_z launch argument in _setup().
+INITIAL_LEADER_XY = [2.675, 0.050]
+INITIAL_FOLLOWER_XY = [4.475, 0.750]
 
 # Parent-minus-follower vector in pool-aligned core NWU.
 INITIAL_RELATIVE = [-1.800, -0.700, 0.000]
@@ -35,14 +37,17 @@ FORMATION_RELATIVE_POSITIONS = [
     -1.80, -0.70,  0.00,  # pair_nominal
     -2.25, -1.00,  0.00,  # pair_far
     -1.30, -0.40,  0.00,  # pair_close
-    -1.80, -0.70, -0.20,  # pair_high
+    -1.80, -0.70, -0.20,  # pair_high (not used by the current wet runner)
     -3.05, -0.90,  0.00,  # pair_range_far_edge
     -0.68, -0.15,  0.00,  # pair_range_close_edge
     -1.55, -1.30,  0.00,  # pair_fov_edge
 ]
 
+
 def _state_settings(context):
-    state_source = LaunchConfiguration("state_source").perform(context).strip().lower()
+    state_source = (
+        LaunchConfiguration("state_source").perform(context).strip().lower()
+    )
     if state_source not in ("px4", "nav_msgs"):
         raise ValueError("state_source must be 'px4' or 'nav_msgs'.")
 
@@ -51,7 +56,7 @@ def _state_settings(context):
         template = (
             "/{robot}/fmu/out/vehicle_odometry"
             if state_source == "px4"
-            else "/mocap/{robot}/odom"
+            else "/mocap/{robot}/odom_ekf"
         )
 
     if "{robot}" not in template and "{robot_lower}" not in template:
@@ -62,9 +67,7 @@ def _state_settings(context):
     def topic(robot):
         name = str(robot)
         return (
-            template
-            .replace("{robot}", name)
-            .replace("{robot_lower}", name.lower())
+            template.replace("{robot}", name).replace("{robot_lower}", name.lower())
         )
 
     return state_source, template, topic
@@ -75,12 +78,8 @@ def _common_parameters(context):
     return {
         "dt": float(LaunchConfiguration("dt").perform(context)),
         "state_source": state_source,
-        "mocap_world_frame": LaunchConfiguration(
-            "mocap_world_frame"
-        ).perform(context),
-        "odom_twist_frame": LaunchConfiguration(
-            "odom_twist_frame"
-        ).perform(context),
+        "mocap_world_frame": LaunchConfiguration("mocap_world_frame").perform(context),
+        "odom_twist_frame": LaunchConfiguration("odom_twist_frame").perform(context),
         "control_space": "thruster",
         "dry_run": LaunchConfiguration("dry_run").perform(context).lower()
         in ("1", "true", "yes", "on"),
@@ -91,9 +90,7 @@ def _common_parameters(context):
             in ("1", "true", "yes", "on")
         ),
         "workspace_adaptive": (
-            LaunchConfiguration("workspace_adaptive")
-            .perform(context)
-            .lower()
+            LaunchConfiguration("workspace_adaptive").perform(context).lower()
             in ("1", "true", "yes", "on")
         ),
         "workspace_physical_lower": [0.300, -1.975, -2.155],
@@ -114,18 +111,12 @@ def _common_parameters(context):
             LaunchConfiguration("virtual_angular_gain").perform(context)
         ),
         "command_filter_linear_bandwidth": float(
-            LaunchConfiguration(
-                "command_filter_linear_bandwidth"
-            ).perform(context)
+            LaunchConfiguration("command_filter_linear_bandwidth").perform(context)
         ),
         "command_filter_angular_bandwidth": float(
-            LaunchConfiguration(
-                "command_filter_angular_bandwidth"
-            ).perform(context)
+            LaunchConfiguration("command_filter_angular_bandwidth").perform(context)
         ),
-        "alpha_gain": float(
-            LaunchConfiguration("alpha_gain").perform(context)
-        ),
+        "alpha_gain": float(LaunchConfiguration("alpha_gain").perform(context)),
     }
 
 
@@ -143,26 +134,20 @@ def _state_launch_arguments():
             "state_topic_template",
             default_value="",
             description=(
-                "Per-robot state topic template. Use {robot} or "
-                "{robot_lower}. Empty selects the source default: "
-                "/{robot}/fmu/out/vehicle_odometry for px4, "
-                "/mocap/{robot}/odom for nav_msgs."
+                "Per-robot state topic template. Empty selects "
+                "/{robot}/fmu/out/vehicle_odometry for px4 and "
+                "/mocap/{robot}/odom_ekf for nav_msgs."
             ),
         ),
         DeclareLaunchArgument(
             "mocap_world_frame",
             default_value="core_nwu",
-            description=(
-                "World-frame convention for nav_msgs/Odometry: "
-                "'core_nwu' or 'ros_enu'."
-            ),
+            description="World-frame convention of nav_msgs/Odometry.",
         ),
         DeclareLaunchArgument(
             "odom_twist_frame",
             default_value="body",
-            description=(
-                "Twist convention for nav_msgs/Odometry: 'body' or 'world'."
-            ),
+            description="Twist convention for nav_msgs/Odometry: body or world.",
         ),
     ]
 
@@ -170,6 +155,12 @@ def _state_launch_arguments():
 def _setup(context):
     leader = LaunchConfiguration("leader").perform(context)
     follower = LaunchConfiguration("follower").perform(context)
+    initialization_z = float(
+        LaunchConfiguration("initialization_z").perform(context)
+    )
+    initial_leader_position = [*INITIAL_LEADER_XY, initialization_z]
+    initial_follower_position = [*INITIAL_FOLLOWER_XY, initialization_z]
+
     state_source, template, topic = _state_settings(context)
     common = _common_parameters(context)
 
@@ -182,8 +173,8 @@ def _setup(context):
             {
                 "robot_names": [leader, follower],
                 "initial_positions": [
-                    *INITIAL_LEADER_POSITION,
-                    *INITIAL_FOLLOWER_POSITION,
+                    *initial_leader_position,
+                    *initial_follower_position,
                 ],
                 "phase_topic": PHASE_TOPIC,
                 "position_tolerance": 0.65,
@@ -221,7 +212,7 @@ def _setup(context):
                         "leader_reference_mode"
                     ).perform(context),
                     "experiment_phase_topic": PHASE_TOPIC,
-                    "initialization_position": INITIAL_LEADER_POSITION,
+                    "initialization_position": initial_leader_position,
                     "position_gain": float(
                         LaunchConfiguration("position_gain").perform(context)
                     ),
@@ -252,13 +243,11 @@ def _setup(context):
                     "self_odometry_topic": topic(follower),
                     "parent_odometry_topic": topic(leader),
                     "desired_relative_position": INITIAL_RELATIVE,
-                    "initialization_position": INITIAL_FOLLOWER_POSITION,
+                    "initialization_position": initial_follower_position,
                     "experiment_phase_topic": PHASE_TOPIC,
                     "desired_formation_topic": FORMATION_TOPIC,
                     "formation_names": FORMATION_NAMES,
-                    "formation_relative_positions": (
-                        FORMATION_RELATIVE_POSITIONS
-                    ),
+                    "formation_relative_positions": FORMATION_RELATIVE_POSITIONS,
                     "formation_gain": float(
                         LaunchConfiguration("formation_gain").perform(context)
                     ),
@@ -282,6 +271,15 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("follower", default_value="itrl_rov_2"),
         DeclareLaunchArgument("dt", default_value="0.02"),
         DeclareLaunchArgument("dry_run", default_value="true"),
+        DeclareLaunchArgument(
+            "initialization_z",
+            default_value="-1.45",
+            description=(
+                "Common core-NWU initialization depth [m]. Negative is down. "
+                "The wet default is kept well below the near-surface MoCap "
+                "dropout region."
+            ),
+        ),
         DeclareLaunchArgument(
             "leader_reference_mode",
             default_value="stationary",

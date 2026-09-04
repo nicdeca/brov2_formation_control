@@ -20,9 +20,9 @@ bubble -> splash
 Current pool-aligned initialization positions:
 
 ```text
-splash = [2.675,  0.050, -0.775]
-glub   = [4.475, -0.650, -0.775]
-bubble = [4.475,  0.750, -0.775]
+splash = [2.675,  0.050, -1.450]
+glub   = [4.475, -0.650, -1.450]
+bubble = [4.475,  0.750, -1.450]
 ```
 
 Nominal parent-minus-follower vectors:
@@ -31,6 +31,15 @@ Nominal parent-minus-follower vectors:
 glub   -> splash: [-1.800,  0.700, 0.000]
 bubble -> splash: [-1.800, -0.700, 0.000]
 ```
+
+
+The common initialization depth is exposed as
+
+```text
+initialization_z:=-1.45
+```
+
+and is forwarded to the phase manager and all three controller nodes.
 
 ## Four supported state-estimation test modes
 
@@ -103,7 +112,8 @@ ros2 launch formation_control_ros \
   workspace_adaptive:=true
 ```
 
-For each robot this creates:
+For each robot this creates a simulated raw MoCap stream with the same NED
+world / FRD body convention used by the laboratory system:
 
 ```text
 PX4 VehicleOdometry
@@ -182,27 +192,21 @@ ros2 launch formation_control_ros \
   workspace_adaptive:=true
 ```
 
-The estimator output is always core-NWU / body-FLU. By default it uses:
+The estimator output is always core-NWU / body-FLU.  The current hardware
+wrapper defaults to `use_imu_gyro:=false` because the MAVROS gyro stream is not
+available in the pool stack; angular velocity therefore falls back to MoCap
+attitude finite differences.  SITL still enables its pseudo-gyro explicitly.
+
+The laboratory raw MoCap convention is now built into the default hardware
+path:
 
 ```text
-/splash/mavros/imu/data
-/glub/mavros/imu/data
-/bubble/mavros/imu/data
+raw MoCap = NED world / FRD body
+EKF output = core NWU world / FLU body
 ```
 
-for body-FLU gyro.
-
-If real MoCap does not already use the core pool frame, pass the same frame
-calibration arguments documented in `mocap_odom_ekf.md`:
-
-```text
-input_world_frame
-input_body_frame
-world_to_core_translation
-world_to_core_quaternion_xyzw
-body_flu_to_input_quaternion_xyzw
-body_origin_offset_input_body
-```
+No frame arguments are required for the normal pool experiment.  Generic
+calibration arguments remain available for future recalibration.
 
 Before actuation, verify all three `/pose_core` and `/odom_ekf` streams.
 

@@ -72,11 +72,11 @@ def generate_launch_description() -> LaunchDescription:
             ),
             DeclareLaunchArgument(
                 "pose_frame_id",
-                default_value="core_nwu",
+                default_value="mocap_ned",
             ),
             DeclareLaunchArgument(
                 "imu_frame_id_template",
-                default_value="{robot}/base_link",
+                default_value="{robot}/base_link_frd",
             ),
             DeclareLaunchArgument(
                 "status_period_sec",

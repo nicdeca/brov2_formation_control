@@ -50,6 +50,7 @@ from tf2_ros import TransformBroadcaster
 
 
 S_FLU_FRD = np.diag([1.0, -1.0, -1.0])
+R_CORE_FROM_NED = np.diag([1.0, -1.0, -1.0])
 R_CORE_FROM_ROS_ENU = np.array(
     [
         [0.0, 1.0, 0.0],
@@ -391,11 +392,11 @@ class MocapStateEstimatorNode(Node):
         # Incoming MoCap pose convention.
         self.declare_parameter(
             "input_world_frame",
-            "core_nwu",
-        )  # core_nwu | ros_enu | custom
+            "ned",
+        )  # ned | core_nwu | ros_enu | custom
         self.declare_parameter(
             "input_body_frame",
-            "flu",
+            "frd",
         )  # flu | frd | custom
         self.declare_parameter(
             "world_to_core_translation",
@@ -640,6 +641,8 @@ class MocapStateEstimatorNode(Node):
         ).strip().lower()
         if world_mode == "core_nwu":
             r_core_input = np.eye(3, dtype=float)
+        elif world_mode == "ned":
+            r_core_input = R_CORE_FROM_NED.copy()
         elif world_mode == "ros_enu":
             r_core_input = R_CORE_FROM_ROS_ENU.copy()
         elif world_mode == "custom":
@@ -653,7 +656,7 @@ class MocapStateEstimatorNode(Node):
             )
         else:
             raise ValueError(
-                "input_world_frame must be core_nwu, ros_enu, or custom"
+                "input_world_frame must be core_nwu, ned, ros_enu, or custom"
             )
 
         body_mode = str(

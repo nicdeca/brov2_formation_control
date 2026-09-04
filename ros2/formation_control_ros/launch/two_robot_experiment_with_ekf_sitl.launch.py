@@ -32,8 +32,8 @@ def _setup(context):
             "input_topic_template": "/{robot}/fmu/out/vehicle_odometry",
             "output_pose_topic_template": "/mocap/{robot}/pose",
             "output_imu_topic_template": "/mocap/{robot}/imu",
-            "pose_frame_id": "core_nwu",
-            "imu_frame_id_template": "{robot}/base_link",
+            "pose_frame_id": "mocap_ned",
+            "imu_frame_id_template": "{robot}/base_link_frd",
         }.items(),
     )
 
@@ -51,6 +51,7 @@ def _setup(context):
             "leader": leader,
             "follower": follower,
             "dry_run": _perform(context, "dry_run"),
+            "initialization_z": _perform(context, "initialization_z"),
             "leader_reference_mode": _perform(
                 context, "leader_reference_mode"
             ),
@@ -66,11 +67,11 @@ def _setup(context):
             "core_pose_topic_template": "/mocap/{robot}/pose_core",
             "odom_topic_template": "/mocap/{robot}/odom_ekf",
             "imu_topic_template": "/mocap/{robot}/imu",
-            "input_world_frame": "core_nwu",
-            "input_body_frame": "flu",
+            "input_world_frame": "ned",
+            "input_body_frame": "frd",
             "world_to_core_translation": "0,0,0",
             "use_imu_gyro": "true",
-            "imu_body_frame": "flu",
+            "imu_body_frame": "frd",
             "publish_tf": _perform(context, "publish_tf"),
             # SITL pseudo-MoCap is exact enough that we can use the direct
             # attitude measurement and a tight nominal measurement std.
@@ -90,6 +91,11 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("leader", default_value="itrl_rov_1"),
             DeclareLaunchArgument("follower", default_value="itrl_rov_2"),
             DeclareLaunchArgument("dry_run", default_value="true"),
+            DeclareLaunchArgument(
+                "initialization_z",
+                default_value="-1.45",
+                description="Common core-NWU initialization depth [m].",
+            ),
             DeclareLaunchArgument(
                 "leader_reference_mode",
                 default_value="velocity",
