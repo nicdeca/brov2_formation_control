@@ -6,9 +6,9 @@ Usual physical assignment:
 
 ```text
 leader   = splash
-follower = glub
+follower = bubble
 
-glub -> splash
+bubble -> splash
 ```
 
 Known laboratory dynamics mapping:
@@ -25,14 +25,24 @@ The desired relative vector uses the controller convention
 p_parent - p_follower
 ```
 
-For the current two-robot `follower:=glub` / `leader:=splash` launch, the initialization geometry is
+For the current two-robot `follower:=bubble` / `leader:=splash` launch, the initialization geometry is
 
 ```text
-splash = [2.675, 0.050, -0.775]
-glub   = [4.475, 0.750, -0.775]
+splash   = [2.675, 0.050, -1.450]
+follower = [4.475, 0.750, -1.450]
 
-p_splash - p_glub = [-1.800, -0.700, 0.000]
+p_splash - p_follower = [-1.800, -0.700, 0.000]
 ```
+
+The common depth is a launch argument:
+
+```text
+initialization_z:=-1.45
+```
+
+This is the wet-test default because MoCap tracking degrades near the surface.
+The controller nodes receive this value through their `initialization_position`
+parameter; no controller source edit is required.
 
 ## Four supported state-estimation test modes
 
@@ -61,7 +71,7 @@ Use the same names as the physical robots:
 ros2 launch formation_control_ros multi_bluerov2_sim.launch.py \
   robot_count:=2 \
   robot_1_name:=splash \
-  robot_2_name:=glub \
+  robot_2_name:=bubble \
   px4_dir:=/home/nicola/Gits/KTH-PX4/PX4-Autopilot
 ```
 
@@ -80,7 +90,7 @@ models, explicitly select `gazebo`:
 ros2 launch formation_control_ros two_robot_experiment.launch.py \
   dry_run:=true \
   leader:=splash \
-  follower:=glub \
+  follower:=bubble \
   leader_robot_configuration:=gazebo \
   follower_robot_configuration:=gazebo \
   leader_reference_mode:=velocity \
@@ -99,7 +109,7 @@ The controller consumes:
 
 ```text
 /splash/fmu/out/vehicle_odometry
-/glub/fmu/out/vehicle_odometry
+/bubble/fmu/out/vehicle_odometry
 ```
 
 and the ROS boundary converts PX4 NED/FRD to core NWU/FLU.
@@ -114,14 +124,16 @@ Keep the same Gazebo/PX4 and DDS processes running, then launch:
 ros2 launch formation_control_ros \
   two_robot_experiment_with_ekf_sitl.launch.py \
   leader:=splash \
-  follower:=glub \
+  follower:=bubble \
   dry_run:=true \
   leader_reference_mode:=velocity \
   workspace_barrier_enabled:=true \
   workspace_adaptive:=true
 ```
 
-This starts the complete simulated sensor/estimator path:
+This starts the complete simulated sensor/estimator path.  The simulated raw
+MoCap now deliberately matches the laboratory convention (NED world / FRD
+body), so SITL exercises exactly the same frame conversion as hardware:
 
 ```text
 PX4 VehicleOdometry
@@ -148,10 +160,10 @@ The SITL wrapper forces both vehicle models to `gazebo`.
 Verify once:
 
 ```bash
-ros2 topic echo /mocap/glub/pose --once
-ros2 topic echo /mocap/glub/imu --once
-ros2 topic echo /mocap/glub/pose_core --once
-ros2 topic echo /mocap/glub/odom_ekf --once
+ros2 topic echo /mocap/bubble/pose --once
+ros2 topic echo /mocap/bubble/imu --once
+ros2 topic echo /mocap/bubble/pose_core --once
+ros2 topic echo /mocap/bubble/odom_ekf --once
 ```
 
 and repeat for `splash`.
@@ -176,7 +188,7 @@ Start the physical PX4/network stack, then:
 ros2 launch formation_control_ros two_robot_experiment.launch.py \
   dry_run:=true \
   leader:=splash \
-  follower:=glub \
+  follower:=bubble \
   leader_reference_mode:=velocity \
   state_source:=px4 \
   workspace_barrier_enabled:=true \
@@ -205,7 +217,7 @@ The real MoCap system must publish:
 
 ```text
 /mocap/splash/pose
-/mocap/glub/pose
+/mocap/bubble/pose
 ```
 
 The hardware wrapper starts one estimator per robot and configures the
@@ -216,7 +228,7 @@ ros2 launch formation_control_ros \
   two_robot_experiment_with_ekf.launch.py \
   dry_run:=true \
   leader:=splash \
-  follower:=glub \
+  follower:=bubble \
   leader_reference_mode:=velocity \
   workspace_barrier_enabled:=true \
   workspace_adaptive:=true
@@ -230,44 +242,40 @@ body  = FLU
 twist = body FLU
 ```
 
-The default hardware gyro input is:
+The hardware wrapper currently defaults to `use_imu_gyro:=false` because the
+MAVROS gyro topic is not available in the current pool stack.  The estimator
+therefore uses MoCap attitude finite differences for angular velocity.  If a
+body-FLU gyro becomes available later, enable it with `use_imu_gyro:=true` and
+set `imu_topic_template` accordingly.
+
+### Stabilized laboratory frame convention
+
+The laboratory raw MoCap convention has been measured and is now the default:
 
 ```text
-/<robot>/mavros/imu/data
+raw MoCap world = NED
+raw rigid body  = FRD
 ```
 
-with `imu_body_frame:=flu`.
-
-### If the raw MoCap frame is not already core NWU / FLU
-
-Configure the estimator at the MoCap input boundary:
+The estimator converts this internally to
 
 ```text
-input_world_frame:=core_nwu | ros_enu | custom
-input_body_frame:=flu | frd | custom
-world_to_core_translation:=x,y,z
-world_to_core_quaternion_xyzw:=qx,qy,qz,qw
-body_flu_to_input_quaternion_xyzw:=qx,qy,qz,qw
-body_origin_offset_input_body:=x,y,z
+controller world = core NWU
+controller body  = FLU
 ```
 
-Example for a ROS-ENU MoCap world:
+Therefore the normal hardware launch no longer needs custom frame arguments.
+The equivalent low-level settings are `input_world_frame:=ned` and
+`input_body_frame:=frd`.
 
-```bash
-ros2 launch formation_control_ros \
-  two_robot_experiment_with_ekf.launch.py \
-  dry_run:=true \
-  leader:=splash \
-  follower:=glub \
-  leader_reference_mode:=velocity \
-  input_world_frame:=ros_enu
-```
+The generic transform arguments remain available only for future recalibration
+or another MoCap system.
 
 Before actuation, verify:
 
 ```bash
-ros2 topic echo /mocap/glub/pose_core --once
-ros2 topic echo /mocap/glub/odom_ekf --once
+ros2 topic echo /mocap/bubble/pose_core --once
+ros2 topic echo /mocap/bubble/odom_ekf --once
 ```
 
 `pose_core` is the raw MoCap measurement after only frame/origin calibration;
@@ -282,8 +290,8 @@ ros2 topic echo /mocap/glub/odom_ekf --once
 ```bash
 scripts/record_formation_experiment.sh \
   --name two_robot_experiment_px4 \
-  --robots splash,glub \
-  --edge glub:splash \
+  --robots splash,bubble \
+  --edge bubble:splash \
   --state-source px4
 ```
 
@@ -292,8 +300,8 @@ scripts/record_formation_experiment.sh \
 ```bash
 scripts/record_formation_experiment.sh \
   --name two_robot_experiment_ekf \
-  --robots splash,glub \
-  --edge glub:splash \
+  --robots splash,bubble \
+  --edge bubble:splash \
   --state-source nav_msgs \
   --state-topic-template '/mocap/{robot}/odom_ekf' \
   --mocap-world-frame core_nwu \

@@ -2,6 +2,9 @@
 """Run reproducible two-BlueROV formation experiments.
 
 Leader velocity commands are expressed in the pool-aligned core NWU frame.
+The absolute mission depth is set by the INITIALIZE targets in the launch
+configuration.  All wet-test profiles below keep leader vertical velocity
+at zero so that the mission remains around that initialized depth.
 
 The script can be started before arming.  It waits for FORMATION and for the
 leader/follower command subscriptions.
@@ -233,8 +236,11 @@ class TwoRobotExperimentRunner(Node):
         self.publish_velocity(0.0, -0.10, 0.0, duration=3.5)
         self.settle(8.0)
 
-        self.publish_formation("pair_high")
-        self.settle(12.0)
+        # Keep the wet experiment at the initialized depth.  Do not use
+        # pair_high here: it raises the follower relative to the leader and can
+        # bring it into the near-surface region where MoCap tracking degrades.
+        self.publish_formation("pair_nominal")
+        self.settle(8.0)
 
         self.publish_velocity(-0.14, 0.0, 0.0, duration=5.0)
         self.settle(8.0)

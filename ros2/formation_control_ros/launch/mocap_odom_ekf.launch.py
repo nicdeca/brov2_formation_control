@@ -201,15 +201,15 @@ def generate_launch_description() -> LaunchDescription:
                 "publish_tf",
                 default_value="false",
             ),
-            # Incoming real MoCap convention.
+            # Laboratory MoCap convention (raw pose is NED / FRD).
             DeclareLaunchArgument(
                 "input_world_frame",
-                default_value="core_nwu",
-                description="core_nwu | ros_enu | custom",
+                default_value="ned",
+                description="ned | core_nwu | ros_enu | custom",
             ),
             DeclareLaunchArgument(
                 "input_body_frame",
-                default_value="flu",
+                default_value="frd",
                 description="flu | frd | custom",
             ),
             DeclareLaunchArgument(

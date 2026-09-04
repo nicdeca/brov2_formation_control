@@ -91,6 +91,7 @@ def _setup(context):
             "follower": follower,
             "dt": _perform(context, "dt"),
             "dry_run": _perform(context, "dry_run"),
+            "initialization_z": _perform(context, "initialization_z"),
             "leader_reference_mode": _perform(
                 context, "leader_reference_mode"
             ),
@@ -138,6 +139,11 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("follower", default_value="itrl_rov_2"),
             DeclareLaunchArgument("dt", default_value="0.02"),
             DeclareLaunchArgument("dry_run", default_value="true"),
+            DeclareLaunchArgument(
+                "initialization_z",
+                default_value="-1.45",
+                description="Common core-NWU wet-test initialization depth [m].",
+            ),
             DeclareLaunchArgument(
                 "leader_reference_mode",
                 default_value="stationary",
@@ -201,15 +207,16 @@ def generate_launch_description() -> LaunchDescription:
                 "publish_tf",
                 default_value="false",
             ),
-            # Real MoCap input convention. Defaults assume that the physical
-            # bridge already publishes the pool/core NWU world and FLU body.
+            # Laboratory raw MoCap convention established in the pool:
+            # NED world and FRD rigid body. The estimator converts this to the
+            # controller-facing core NWU / FLU contract.
             DeclareLaunchArgument(
                 "input_world_frame",
-                default_value="core_nwu",
+                default_value="ned",
             ),
             DeclareLaunchArgument(
                 "input_body_frame",
-                default_value="flu",
+                default_value="frd",
             ),
             DeclareLaunchArgument(
                 "world_to_core_translation",
@@ -230,7 +237,11 @@ def generate_launch_description() -> LaunchDescription:
             # Real robot gyro.
             DeclareLaunchArgument(
                 "use_imu_gyro",
-                default_value="true",
+                default_value="false",
+                description=(
+                    "Hardware default: no MAVROS gyro is currently available. "
+                    "The estimator uses MoCap attitude finite differences."
+                ),
             ),
             DeclareLaunchArgument(
                 "imu_body_frame",
