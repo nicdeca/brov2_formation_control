@@ -111,3 +111,55 @@ python3 scripts/run_three_robot_experiment.py \
   --leader splash \
   --profile full
 ```
+
+
+## Recording, export, and plotting
+
+For the physical three-robot experiment:
+
+```bash
+scripts/record_formation_experiment.sh \
+  --name three_robot_experiment_ekf \
+  --robots splash,glub,bubble \
+  --edge glub:splash \
+  --edge bubble:splash \
+  --state-source nav_msgs \
+  --state-topic-template '/mocap/{robot}/odom_ekf' \
+  --mocap-world-frame core_nwu \
+  --odom-twist-frame body \
+  --imu-topic-template '/{robot}/mavros/imu/data'
+```
+
+The recorder always includes PX4 VehicleOdometry, transformed raw MoCap
+`/pose_core`, and `/odom_ekf` for every listed robot.
+
+After the run:
+
+```bash
+RUN=$(ls -dt outputs/experiments/* | head -n 1)
+python3 scripts/export_experiment.py "$RUN"
+python3 scripts/plot_experiment.py "$RUN" \
+  --mission-preset paper \
+  --format pdf
+```
+
+For the mission only:
+
+```bash
+python3 scripts/export_formation_bag.py "$RUN" --phase mission
+
+uv run python scripts/plot_formation_experiment.py \
+  "$RUN/mission/formation_history.npz" \
+  --paper \
+  --paper-quality \
+  --save
+```
+
+The mission plotter now also generates PX4/EKF/raw-MoCap comparison figures by
+default when those arrays are present. To run only that comparison:
+
+```bash
+uv run python scripts/plot_state_estimator_comparison.py \
+  "$RUN/mission/formation_history.npz" \
+  --save
+```

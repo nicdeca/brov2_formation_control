@@ -4,7 +4,8 @@
 The rosbag exporter writes a ROS-independent ``formation_history.npz``.  This
 script adapts that history back to ``FormationScenario``, ``FormationTrajectory``
 and ``CLFDiagnosticHistory`` and then calls the same plotting functions used by
-``examples/04_bluerov2_fov_clf_qp.py``.
+``examples/04_bluerov2_fov_clf_qp.py``.  When PX4/EKF comparison arrays are
+present, state-estimator comparison figures are generated automatically as well.
 
 Typical usage::
 
@@ -27,6 +28,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import inspect
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -2160,6 +2162,48 @@ def _save_figures(
     print(f"Absolute output folder: {output_dir}")
 
 
+
+def _run_estimator_comparison(args) -> None:
+    """Run the dedicated estimator-comparison plotter on the same history."""
+    if args.no_estimator_comparison:
+        return
+
+    comparison_script = (
+        Path(__file__).resolve().parent
+        / "plot_state_estimator_comparison.py"
+    )
+    if not comparison_script.exists():
+        print(
+            "Skipping estimator comparison: "
+            f"{comparison_script} does not exist."
+        )
+        return
+
+    command = [
+        sys.executable,
+        str(comparison_script),
+        str(args.history.expanduser().resolve()),
+        "--format",
+        args.format,
+    ]
+    if args.save:
+        command.append("--save")
+    if args.show:
+        command.append("--show")
+    if args.output_dir is not None:
+        command.extend(
+            ["--output-dir", str(args.output_dir.expanduser().resolve())]
+        )
+
+    print("\n=== State-estimator comparison ===", flush=True)
+    result = subprocess.run(command, check=False)
+    if result.returncode != 0:
+        print(
+            "WARNING: estimator-comparison plotting returned exit code "
+            f"{result.returncode}."
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("history", type=Path)
@@ -2272,6 +2316,14 @@ def main() -> None:
         "--format",
         choices=("pdf", "png", "svg"),
         default="pdf",
+    )
+    parser.add_argument(
+        "--no-estimator-comparison",
+        action="store_true",
+        help=(
+            "skip automatic PX4 / EKF / transformed raw-MoCap comparison "
+            "when those arrays are present in the exported history"
+        ),
     )
     args = parser.parse_args()
 
@@ -2608,6 +2660,8 @@ def main() -> None:
             plt.close(formation_animation.figure)
         for figure, _ in diagnostic_animations.values():
             plt.close(figure)
+
+    _run_estimator_comparison(args)
 
 
 if __name__ == "__main__":

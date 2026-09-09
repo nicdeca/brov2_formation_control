@@ -104,3 +104,14 @@ The comparison includes:
 
 Raw-MoCap finite-difference velocities are diagnostics only and are never fed
 back to the controller.
+
+
+## Which plotting command includes the estimator comparison?
+
+`plot_state_estimator_comparison.py` is the dedicated estimator plotter.
+
+`plot_experiment.py` is the run-level orchestrator and calls it automatically.
+
+The maintained `plot_formation_experiment.py` also calls it automatically by
+default when plotting a mission NPZ. Use `--no-estimator-comparison` only when
+formation/control figures are desired in isolation.
