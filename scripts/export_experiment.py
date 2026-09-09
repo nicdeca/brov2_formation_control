@@ -1,5 +1,20 @@
 #!/usr/bin/env python3
-"""Export every available phase of a split formation-experiment run."""
+"""Export every available phase of one formation-experiment run.
+
+The maintained user-facing exporter uses a single command for the complete
+run directory. It automatically discovers the split phases:
+
+    <run>/initialization/bag
+    <run>/mission/bag
+
+Behavior:
+- initialization only -> export initialization;
+- mission only        -> export mission;
+- both                -> export both;
+- neither             -> fail clearly.
+
+The phase-specific exporters remain available as lower-level debugging tools.
+"""
 
 from __future__ import annotations
 
@@ -24,10 +39,26 @@ def main() -> None:
         raise FileNotFoundError(f"run directory does not exist: {run_dir}")
 
     scripts_dir = Path(__file__).resolve().parent
-    exported = []
 
     initialization_bag = run_dir / "initialization" / "bag"
+    mission_bag = run_dir / "mission" / "bag"
+
+    available = []
     if initialization_bag.exists():
+        available.append("initialization")
+    if mission_bag.exists():
+        available.append("mission")
+
+    if not available:
+        raise FileNotFoundError(
+            "No experiment phase bag was found. Expected at least one of:\n"
+            f"  - {initialization_bag}\n"
+            f"  - {mission_bag}"
+        )
+
+    exported = []
+
+    if "initialization" in available:
         _run(
             [
                 sys.executable,
@@ -36,16 +67,17 @@ def main() -> None:
             ],
             "Export initialization",
         )
-        exported.append("initialization")
-    else:
-        print(
-            f"Skipping initialization: bag does not exist at "
-            f"{initialization_bag}",
-            flush=True,
+        history = (
+            run_dir / "initialization" / "initialization_history.npz"
         )
+        if not history.exists():
+            raise RuntimeError(
+                "Initialization exporter completed but did not create "
+                f"{history}"
+            )
+        exported.append(("initialization", history))
 
-    mission_bag = run_dir / "mission" / "bag"
-    if mission_bag.exists():
+    if "mission" in available:
         _run(
             [
                 sys.executable,
@@ -56,18 +88,17 @@ def main() -> None:
             ],
             "Export mission",
         )
-        exported.append("mission")
-    else:
-        print(
-            f"Skipping mission: bag does not exist at {mission_bag}",
-            flush=True,
-        )
-
-    if not exported:
-        raise SystemExit("No initialization or mission bag was found.")
+        history = run_dir / "mission" / "formation_history.npz"
+        if not history.exists():
+            raise RuntimeError(
+                "Mission exporter completed but did not create "
+                f"{history}"
+            )
+        exported.append(("mission", history))
 
     print("\nExperiment export complete.")
-    print(f"Exported phases: {', '.join(exported)}")
+    for phase, history in exported:
+        print(f"{phase.capitalize():14s}: {history}")
 
 
 if __name__ == "__main__":
