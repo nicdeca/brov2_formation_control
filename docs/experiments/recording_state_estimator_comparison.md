@@ -115,3 +115,22 @@ back to the controller.
 The maintained `plot_formation_experiment.py` also calls it automatically by
 default when plotting a mission NPZ. Use `--no-estimator-comparison` only when
 formation/control figures are desired in isolation.
+
+## Maintained run-level workflow
+
+Normal post-processing uses exactly one export command and one plot command:
+
+```bash
+RUN=$(ls -dt outputs/experiments/* | head -n 1)
+python3 scripts/export_experiment.py "$RUN"
+python3 scripts/plot_experiment.py "$RUN" \
+  --mission-preset paper \
+  --format pdf
+```
+
+Both commands automatically discover the available phases. If initialization
+and mission are both present, both are processed; if only one is present, that
+phase is still exported and plotted.
+
+The state-estimator comparison is attempted independently for every exported
+phase.

@@ -271,7 +271,7 @@ def write_manifest(
 
 
 def run_postprocessing(run_dir: Path, *, mission_exists: bool) -> None:
-    """Export and plot every phase available in the completed run."""
+    """Export and plot every experiment phase that is available."""
     scripts_dir = Path(__file__).resolve().parent
     export_script = scripts_dir / "export_experiment.py"
     plot_script = scripts_dir / "plot_experiment.py"
@@ -285,9 +285,9 @@ def run_postprocessing(run_dir: Path, *, mission_exists: bool) -> None:
                 file=sys.stderr,
             )
 
-    # `export_experiment.py` and `plot_experiment.py` both skip unavailable
-    # phases. This means a failed initialization run still produces useful
-    # initialization output without requiring a mission bag.
+    # The run-level exporter and plotter discover which split phases are
+    # present. A partial run therefore still produces useful output, while a
+    # complete run processes initialization and mission in the same commands.
     call(
         [sys.executable, str(export_script), str(run_dir)],
         "Export experiment",

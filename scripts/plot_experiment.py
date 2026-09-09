@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""Plot initialization and mission data for one experiment run.
+"""Plot every available exported phase of one experiment run.
 
-Typical usage:
+Use this as the maintained run-level plotting entry point.
 
-    python3 scripts/plot_experiment.py outputs/experiments/<run>
+Behavior:
+- initialization history only -> plot initialization;
+- mission history only        -> plot mission;
+- both                        -> plot both;
+- neither                     -> fail clearly.
 
-By default every exported phase history that exists is plotted and saved in
-its own phase-specific ``plots/`` directory.
+For each available phase, the PX4 / EKF / transformed-raw-MoCap comparison is
+also attempted unless ``--no-estimator-comparison`` is supplied.
 """
 
 from __future__ import annotations
@@ -17,20 +21,31 @@ import sys
 from pathlib import Path
 
 
-def _run(command: list[str], label: str) -> None:
+def _run(
+    command: list[str],
+    label: str,
+    *,
+    required: bool = True,
+) -> bool:
     print(f"\n=== {label} ===", flush=True)
-    subprocess.run(command, check=True)
+    result = subprocess.run(command, check=False)
+    if result.returncode == 0:
+        return True
+
+    message = (
+        f"{label} returned exit code {result.returncode}: "
+        + " ".join(command)
+    )
+    if required:
+        raise RuntimeError(message)
+
+    print(f"WARNING: {message}")
+    return False
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("run_dir", type=Path)
-    parser.add_argument(
-        "--phase",
-        choices=("all", "initialization", "mission"),
-        default="all",
-        help="phase(s) to plot; default: all exported phases",
-    )
     parser.add_argument(
         "--mission-preset",
         choices=("paper", "all"),
@@ -51,10 +66,7 @@ def main() -> None:
     parser.add_argument(
         "--no-estimator-comparison",
         action="store_true",
-        help=(
-            "skip PX4-vs-MoCap-EKF comparison plots even when both "
-            "estimator histories were exported"
-        ),
+        help="skip estimator-comparison figures for all available phases",
     )
     args = parser.parse_args()
 
@@ -62,93 +74,107 @@ def main() -> None:
     if not run_dir.exists():
         raise FileNotFoundError(f"run directory does not exist: {run_dir}")
 
-    scripts_dir = Path(__file__).resolve().parent
-    initialization_plotter = scripts_dir / "plot_initialization_experiment.py"
-    mission_plotter = scripts_dir / "plot_formation_experiment.py"
-    estimator_plotter = scripts_dir / "plot_state_estimator_comparison.py"
-
-    requested = (
-        ("initialization", "mission")
-        if args.phase == "all"
-        else (args.phase,)
+    initialization_history = (
+        run_dir / "initialization" / "initialization_history.npz"
     )
+    mission_history = run_dir / "mission" / "formation_history.npz"
 
-    plotted: list[str] = []
-    skipped: list[str] = []
+    available = []
+    if initialization_history.exists():
+        available.append("initialization")
+    if mission_history.exists():
+        available.append("mission")
 
-    for phase in requested:
-        if phase == "initialization":
-            history = run_dir / "initialization" / "initialization_history.npz"
-            if not history.exists():
-                skipped.append(phase)
-                print(
-                    f"Skipping initialization: history does not exist at {history}",
-                    flush=True,
-                )
-                continue
-            command = [
-                sys.executable,
-                str(initialization_plotter),
-                str(history),
-                "--save",
-            ]
-        else:
-            history = run_dir / "mission" / "formation_history.npz"
-            if not history.exists():
-                skipped.append(phase)
-                print(
-                    f"Skipping mission: history does not exist at {history}",
-                    flush=True,
-                )
-                continue
-
-            command = [
-                sys.executable,
-                str(mission_plotter),
-                str(history),
-                "--paper-quality",
-                "--save",
-                "--format",
-                args.format,
-            ]
-            command.append(
-                "--paper" if args.mission_preset == "paper" else "--all"
-            )
-            if args.show_legends:
-                command.append("--show-legends")
-
-        _run(command, f"Plot {phase}")
-
-        if not args.no_estimator_comparison:
-            comparison_command = [
-                sys.executable,
-                str(estimator_plotter),
-                str(history),
-                "--save",
-                "--format",
-                args.format,
-            ]
-            _run(
-                comparison_command,
-                f"Compare state estimators ({phase})",
-            )
-
-        plotted.append(phase)
-
-    if not plotted:
-        raise SystemExit(
-            "No phase was plotted. Export the run first with "
-            "scripts/export_experiment.py."
+    if not available:
+        raise FileNotFoundError(
+            "No exported phase history was found. Run "
+            "`python3 scripts/export_experiment.py <RUN>` first. "
+            "Expected at least one of:\n"
+            f"  - {initialization_history}\n"
+            f"  - {mission_history}"
         )
 
+    scripts_dir = Path(__file__).resolve().parent
+    initialization_plotter = (
+        scripts_dir / "plot_initialization_experiment.py"
+    )
+    mission_plotter = scripts_dir / "plot_formation_experiment.py"
+    estimator_plotter = (
+        scripts_dir / "plot_state_estimator_comparison.py"
+    )
+
+    plotted = []
+
+    if "initialization" in available:
+        _run(
+            [
+                sys.executable,
+                str(initialization_plotter),
+                str(initialization_history),
+                "--save",
+            ],
+            "Plot initialization",
+        )
+        plotted.append("initialization")
+
+        if not args.no_estimator_comparison:
+            # Comparison arrays may legitimately be unavailable for an old
+            # recording. Do not prevent the normal initialization plots from
+            # being produced in that case.
+            _run(
+                [
+                    sys.executable,
+                    str(estimator_plotter),
+                    str(initialization_history),
+                    "--save",
+                    "--format",
+                    args.format,
+                ],
+                "Compare state estimators (initialization)",
+                required=False,
+            )
+
+    if "mission" in available:
+        # The mission plotter can invoke the estimator comparison by itself
+        # when used standalone. Suppress that here so the run-level wrapper
+        # performs exactly one comparison for this phase.
+        mission_command = [
+            sys.executable,
+            str(mission_plotter),
+            str(mission_history),
+            "--paper-quality",
+            "--save",
+            "--format",
+            args.format,
+            "--no-estimator-comparison",
+            "--paper" if args.mission_preset == "paper" else "--all",
+        ]
+        if args.show_legends:
+            mission_command.append("--show-legends")
+
+        _run(mission_command, "Plot mission")
+        plotted.append("mission")
+
+        if not args.no_estimator_comparison:
+            _run(
+                [
+                    sys.executable,
+                    str(estimator_plotter),
+                    str(mission_history),
+                    "--save",
+                    "--format",
+                    args.format,
+                ],
+                "Compare state estimators (mission)",
+                required=False,
+            )
+
     print("\nExperiment plotting complete.")
-    print(f"Plotted phases: {', '.join(plotted)}")
-    if skipped:
-        print(f"Unavailable histories: {', '.join(skipped)}")
-    print(f"Absolute run folder: {run_dir}")
     for phase in plotted:
-        output_dir = (run_dir / phase / "plots").resolve()
-        print(f"Absolute {phase} plot folder: {output_dir}")
+        print(
+            f"{phase.capitalize():14s}: "
+            f"{(run_dir / phase / 'plots').resolve()}"
+        )
 
 
 if __name__ == "__main__":

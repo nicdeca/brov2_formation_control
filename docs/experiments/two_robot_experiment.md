@@ -122,11 +122,15 @@ python3 scripts/run_two_robot_experiment.py \
 The `challenging` profile is intended only after the normal wet profiles have
 been validated.
 
-
 ## Recording, export, and plotting
 
-Start the recorder **before arming**. For the current physical two-robot
-experiment:
+The normal workflow uses one recorder command for the run, followed by one
+export command and one plot command. The latter two automatically process
+**every phase that is present**.
+
+### 1. Record
+
+Start the recorder before arming:
 
 ```bash
 scripts/record_formation_experiment.sh \
@@ -140,7 +144,15 @@ scripts/record_formation_experiment.sh \
   --imu-topic-template '/{robot}/mavros/imu/data'
 ```
 
-The recorder explicitly includes, for every robot,
+The recorder may create:
+
+```text
+<RUN>/initialization/bag
+<RUN>/mission/bag
+```
+
+depending on how far the experiment progressed. For every listed robot it also
+records the parallel state-estimator streams:
 
 ```text
 /<robot>/fmu/out/vehicle_odometry
@@ -149,61 +161,42 @@ The recorder explicitly includes, for every robot,
 /mocap/<robot>/odom_ekf
 ```
 
-in addition to controller diagnostics and the configured IMU topic. Thus PX4,
-the EKF, and transformed raw MoCap are available for offline comparison even
-when the controller itself uses `/mocap/<robot>/odom_ekf`.
+### 2. Export everything that exists
 
-The recorder automatically exports and plots when recording closes. To repeat
-post-processing manually, first identify the latest run:
+Select the latest run:
 
 ```bash
 RUN=$(ls -dt outputs/experiments/* | head -n 1)
 ```
 
-### Export the complete split run
-
-Recommended:
+Then use the run-level exporter:
 
 ```bash
 python3 scripts/export_experiment.py "$RUN"
 ```
 
-This exports both initialization and mission when available.
-
-To export only the mission:
-
-```bash
-python3 scripts/export_formation_bag.py "$RUN" --phase mission
-```
-
-The mission output is:
+This single command behaves as follows:
 
 ```text
+initialization only  -> exports initialization
+mission only         -> exports mission
+both                 -> exports both
+neither              -> reports an error
+```
+
+When present, the exported histories are:
+
+```text
+$RUN/initialization/initialization_history.npz
 $RUN/mission/formation_history.npz
 ```
 
-and contains the controller state plus the parallel comparison arrays:
+There is no need to call the phase-specific exporters during the normal
+workflow.
 
-```text
-px4_positions
-px4_quaternions
-px4_linear_velocity_body
-px4_angular_velocity_body
+### 3. Plot everything that was exported
 
-ekf_positions
-ekf_quaternions
-ekf_linear_velocity_body
-ekf_angular_velocity_body
-
-mocap_positions
-mocap_quaternions
-mocap_linear_velocity_body_fd
-mocap_angular_velocity_body_fd
-```
-
-### Plot everything
-
-The recommended high-level command is:
+Use the run-level plotter:
 
 ```bash
 python3 scripts/plot_experiment.py "$RUN" \
@@ -211,58 +204,36 @@ python3 scripts/plot_experiment.py "$RUN" \
   --format pdf
 ```
 
-It produces the normal initialization/formation figures **and** invokes the
-PX4/EKF/raw-MoCap estimator comparison automatically.
-
-For mission plots only, the following also generates estimator-comparison
-figures by default:
-
-```bash
-uv run python scripts/plot_formation_experiment.py \
-  "$RUN/mission/formation_history.npz" \
-  --paper \
-  --paper-quality \
-  --save
-```
-
-To suppress only the estimator comparison, add:
+Again, this is a single command:
 
 ```text
---no-estimator-comparison
+initialization history only  -> plots initialization
+mission history only         -> plots mission
+both                         -> plots both
+neither                      -> reports an error
 ```
 
-To generate only the state-estimator figures:
+For each available phase, the plotter also attempts the PX4 / EKF /
+transformed-raw-MoCap comparison. Therefore, when both phases are present, the
+estimator is compared separately during initialization and during the mission.
 
-```bash
-uv run python scripts/plot_state_estimator_comparison.py \
-  "$RUN/mission/formation_history.npz" \
-  --save
-```
-
-The estimator figures are saved in:
+The output folders are:
 
 ```text
+$RUN/initialization/plots/
 $RUN/mission/plots/
 ```
 
-with names such as:
+whenever the corresponding phase exists.
+
+The lower-level scripts
 
 ```text
-estimator_state_comparison_splash.pdf
-estimator_disagreement_splash.pdf
-estimator_state_comparison_bubble.pdf
-estimator_disagreement_bubble.pdf
+export_initialization_bag.py
+export_formation_bag.py
+plot_initialization_experiment.py
+plot_formation_experiment.py
+plot_state_estimator_comparison.py
 ```
 
-### Quick check that comparison data were exported
-
-If no estimator plots are generated, first verify that the bag actually
-contains the three state streams:
-
-```bash
-ros2 bag info "$RUN/mission/bag" | grep -E \
-  'vehicle_odometry|odom_ekf|pose_core'
-```
-
-Then run the dedicated estimator plotter directly. It reports whether PX4 and
-EKF samples overlap and whether transformed raw MoCap is available.
+remain available for debugging, but are not needed for a normal run.
