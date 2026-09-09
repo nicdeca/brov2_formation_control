@@ -1,25 +1,28 @@
 #!/usr/bin/env python3
-"""Publish simulated MoCap pose + gyro from PX4 SITL odometry.
+"""Publish laboratory-like simulated MoCap pose + gyro from PX4 SITL.
 
-For each robot:
+PX4 VehicleOdometry is first converted through the trusted project state
+adapter and then re-expressed as the raw convention observed in the pool:
 
-    PX4 VehicleOdometry (NED/FRD)
-        -> formation_control_ros state adapter (core NWU / FLU)
-        -> convert back to the laboratory MoCap convention
-        -> PoseStamped in NED / FRD
-        -> Imu angular velocity in body FRD
+    raw MoCap world: NED
+    raw rigid body:  FRD
 
-Default outputs:
+The downstream ``mocap_odom_ekf`` therefore exercises exactly the same
+NED/FRD -> core-NWU/FLU conversion in SITL and in the real experiment.
 
-    /mocap/<robot>/pose
-    /mocap/<robot>/imu
+Two pose-delivery modes are supported:
 
-The simulated raw MoCap convention intentionally matches the laboratory
-MoCap convention discovered during wet testing: NED world and FRD rigid body.
-This forces SITL to exercise exactly the same estimator input-frame conversion
-as the real experiment.
+``ideal``
+    Publish every valid simulated MoCap pose.
 
-This is a software-path validator, not an independent ground-truth sensor.
+``intermittent``
+    Periodically suppress only the MoCap pose stream. The pseudo-IMU continues
+    to publish, which permits testing estimator coasting with a fresh gyro.
+    Setting ``use_imu_gyro:=false`` in the EKF wrapper tests the same dropout
+    without gyro assistance.
+
+This adapter is a software-path validator, not an independent ground-truth
+sensor.
 """
 
 from __future__ import annotations
@@ -49,6 +52,23 @@ def _expand(template: str, robot: str) -> str:
     )
 
 
+def pose_available(
+    elapsed_sec: float,
+    *,
+    mode: str,
+    dropout_start_sec: float,
+    dropout_period_sec: float,
+    dropout_duration_sec: float,
+) -> bool:
+    """Return whether the simulated MoCap pose is available at this time."""
+    if mode == "ideal":
+        return True
+    if elapsed_sec < dropout_start_sec:
+        return True
+    phase = (elapsed_sec - dropout_start_sec) % dropout_period_sec
+    return phase >= dropout_duration_sec
+
+
 class SimulatedMocapNode(Node):
     def __init__(self) -> None:
         super().__init__("simulated_mocap")
@@ -71,6 +91,10 @@ class SimulatedMocapNode(Node):
             "imu_frame_id_template",
             "{robot}/base_link_frd",
         )
+        self.declare_parameter("measurement_mode", "ideal")
+        self.declare_parameter("dropout_start_sec", 5.0)
+        self.declare_parameter("dropout_period_sec", 10.0)
+        self.declare_parameter("dropout_duration_sec", 2.0)
         self.declare_parameter("status_period_sec", 2.0)
 
         self.robots = [
@@ -87,26 +111,56 @@ class SimulatedMocapNode(Node):
             self.get_parameter("input_topic_template").value
         )
         self._pose_template = str(
-            self.get_parameter(
-                "output_pose_topic_template"
-            ).value
+            self.get_parameter("output_pose_topic_template").value
         )
         self._imu_template = str(
-            self.get_parameter(
-                "output_imu_topic_template"
-            ).value
+            self.get_parameter("output_imu_topic_template").value
         )
         self._pose_frame = str(
             self.get_parameter("pose_frame_id").value
         )
         self._imu_frame_template = str(
-            self.get_parameter(
-                "imu_frame_id_template"
-            ).value
+            self.get_parameter("imu_frame_id_template").value
         )
+
+        self._measurement_mode = str(
+            self.get_parameter("measurement_mode").value
+        ).strip().lower()
+        if self._measurement_mode not in ("ideal", "intermittent"):
+            raise ValueError(
+                "measurement_mode must be 'ideal' or 'intermittent'"
+            )
+
+        self._dropout_start_sec = float(
+            self.get_parameter("dropout_start_sec").value
+        )
+        self._dropout_period_sec = float(
+            self.get_parameter("dropout_period_sec").value
+        )
+        self._dropout_duration_sec = float(
+            self.get_parameter("dropout_duration_sec").value
+        )
+        if self._dropout_start_sec < 0.0:
+            raise ValueError("dropout_start_sec must be nonnegative")
+        if self._measurement_mode == "intermittent":
+            if self._dropout_period_sec <= 0.0:
+                raise ValueError(
+                    "dropout_period_sec must be positive in intermittent mode"
+                )
+            if not (
+                0.0 < self._dropout_duration_sec
+                < self._dropout_period_sec
+            ):
+                raise ValueError(
+                    "dropout_duration_sec must lie strictly between zero and "
+                    "dropout_period_sec in intermittent mode"
+                )
+
         status_period = float(
             self.get_parameter("status_period_sec").value
         )
+        if status_period <= 0.0:
+            raise ValueError("status_period_sec must be positive")
 
         output_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -118,18 +172,30 @@ class SimulatedMocapNode(Node):
         self._pose_publishers = {}
         self._imu_publishers = {}
         self._subscriptions = []
+
         self._received = {robot: 0 for robot in self.robots}
-        self._published = {robot: 0 for robot in self.robots}
+        self._pose_published = {robot: 0 for robot in self.robots}
+        self._pose_suppressed = {robot: 0 for robot in self.robots}
+        self._imu_published = {robot: 0 for robot in self.robots}
         self._rejected = {robot: 0 for robot in self.robots}
+
         self._last_status_received = {
             robot: 0 for robot in self.robots
         }
-        self._last_status_published = {
+        self._last_status_pose_published = {
+            robot: 0 for robot in self.robots
+        }
+        self._last_status_pose_suppressed = {
+            robot: 0 for robot in self.robots
+        }
+        self._last_status_imu_published = {
             robot: 0 for robot in self.robots
         }
         self._last_status_rejected = {
             robot: 0 for robot in self.robots
         }
+
+        self._start_sec = self._now_sec()
 
         lines = []
         for robot in self.robots:
@@ -156,16 +222,38 @@ class SimulatedMocapNode(Node):
                 )
             )
             lines.append(
-                f"  {robot}: {input_topic} -> "
-                f"{pose_topic}, {imu_topic}"
+                f"  {robot}: {input_topic} -> {pose_topic}, {imu_topic}"
             )
 
         self.create_timer(status_period, self._status)
+
+        schedule = "continuous"
+        if self._measurement_mode == "intermittent":
+            schedule = (
+                f"first dropout at {self._dropout_start_sec:.1f} s, "
+                f"{self._dropout_duration_sec:.1f} s off every "
+                f"{self._dropout_period_sec:.1f} s"
+            )
+
         self.get_logger().info(
             "Simulated MoCap configured:\n"
             + "\n".join(lines)
-            + "\n  output pose contract: core NWU / FLU"
-            + "\n  output gyro contract: body FLU"
+            + "\n  raw pose contract: world=NED, body=FRD"
+            + "\n  raw gyro contract: body=FRD"
+            + f"\n  pose measurement mode: {self._measurement_mode}"
+            + f"\n  pose schedule: {schedule}"
+        )
+
+    def _now_sec(self) -> float:
+        return 1e-9 * float(self.get_clock().now().nanoseconds)
+
+    def _pose_available_now(self) -> bool:
+        return pose_available(
+            max(0.0, self._now_sec() - self._start_sec),
+            mode=self._measurement_mode,
+            dropout_start_sec=self._dropout_start_sec,
+            dropout_period_sec=self._dropout_period_sec,
+            dropout_duration_sec=self._dropout_duration_sec,
         )
 
     def _callback(self, robot: str):
@@ -184,9 +272,7 @@ class SimulatedMocapNode(Node):
                 )
                 return
 
-            if state.shape != (13,) or not np.all(
-                np.isfinite(state)
-            ):
+            if state.shape != (13,) or not np.all(np.isfinite(state)):
                 self._rejected[robot] += 1
                 self.get_logger().error(
                     f"Invalid converted state for {robot}",
@@ -196,14 +282,12 @@ class SimulatedMocapNode(Node):
 
             stamp = self.get_clock().now().to_msg()
 
-            # The trusted state adapter gives core NWU / FLU.  Convert the
-            # simulated sensor output back to the laboratory raw convention:
+            # Trusted adapter output: core NWU / body FLU.
+            # Re-express it as the raw laboratory convention:
             #
-            #   p_NED = S p_NWU
-            #   R_NED<-FRD = S R_NWU<-FLU S
-            #
-            # with S = diag(1,-1,-1).  Quaternion similarity by the same
-            # Rx(pi) rotation leaves w,x unchanged and flips y,z.
+            #   p_NED = S p_NWU,
+            #   R_NED<-FRD = S R_NWU<-FLU S,
+            #   S = diag(1,-1,-1).
             position_ned = np.array(
                 [state[0], -state[1], -state[2]],
                 dtype=float,
@@ -213,18 +297,33 @@ class SimulatedMocapNode(Node):
                 dtype=float,
             )  # scalar-first [w,x,y,z]
 
-            pose = PoseStamped()
-            pose.header.stamp = stamp
-            pose.header.frame_id = self._pose_frame
-            pose.pose.position.x = float(position_ned[0])
-            pose.pose.position.y = float(position_ned[1])
-            pose.pose.position.z = float(position_ned[2])
-            pose.pose.orientation.w = float(quaternion_ned_frd[0])
-            pose.pose.orientation.x = float(quaternion_ned_frd[1])
-            pose.pose.orientation.y = float(quaternion_ned_frd[2])
-            pose.pose.orientation.z = float(quaternion_ned_frd[3])
-            self._pose_publishers[robot].publish(pose)
+            if self._pose_available_now():
+                pose = PoseStamped()
+                pose.header.stamp = stamp
+                pose.header.frame_id = self._pose_frame
+                pose.pose.position.x = float(position_ned[0])
+                pose.pose.position.y = float(position_ned[1])
+                pose.pose.position.z = float(position_ned[2])
+                pose.pose.orientation.w = float(
+                    quaternion_ned_frd[0]
+                )
+                pose.pose.orientation.x = float(
+                    quaternion_ned_frd[1]
+                )
+                pose.pose.orientation.y = float(
+                    quaternion_ned_frd[2]
+                )
+                pose.pose.orientation.z = float(
+                    quaternion_ned_frd[3]
+                )
+                self._pose_publishers[robot].publish(pose)
+                self._pose_published[robot] += 1
+            else:
+                self._pose_suppressed[robot] += 1
 
+            # The pseudo-IMU is intentionally independent of MoCap visibility.
+            # This lets intermittent-pose tests retain a fresh gyro, exactly as
+            # a robot-mounted IMU would.
             imu = Imu()
             imu.header.stamp = stamp
             imu.header.frame_id = _expand(
@@ -233,14 +332,9 @@ class SimulatedMocapNode(Node):
             )
             imu.orientation_covariance[0] = -1.0
             imu.linear_acceleration_covariance[0] = -1.0
-            # Pseudo-gyro follows the same FRD body convention as the raw
-            # simulated MoCap rigid body, so the SITL estimator exercises its
-            # FRD -> FLU gyro conversion as well.
             imu.angular_velocity.x = float(state[10])
             imu.angular_velocity.y = float(-state[11])
             imu.angular_velocity.z = float(-state[12])
-            # SITL pseudo-gyro: small nominal covariance; this field is only
-            # diagnostic because estimator tuning is parameterized separately.
             variance = 1e-4
             imu.angular_velocity_covariance = [
                 variance, 0.0, 0.0,
@@ -248,20 +342,28 @@ class SimulatedMocapNode(Node):
                 0.0, 0.0, variance,
             ]
             self._imu_publishers[robot].publish(imu)
-            self._published[robot] += 1
+            self._imu_published[robot] += 1
 
         return callback
 
     def _status(self) -> None:
-        """Report only broken/stalled simulated sensor streams."""
+        """Warn only for genuine adapter failures, not intentional dropouts."""
         for robot in self.robots:
             received_delta = (
                 self._received[robot]
                 - self._last_status_received[robot]
             )
-            published_delta = (
-                self._published[robot]
-                - self._last_status_published[robot]
+            pose_published_delta = (
+                self._pose_published[robot]
+                - self._last_status_pose_published[robot]
+            )
+            pose_suppressed_delta = (
+                self._pose_suppressed[robot]
+                - self._last_status_pose_suppressed[robot]
+            )
+            imu_published_delta = (
+                self._imu_published[robot]
+                - self._last_status_imu_published[robot]
             )
             rejected_delta = (
                 self._rejected[robot]
@@ -269,7 +371,15 @@ class SimulatedMocapNode(Node):
             )
 
             self._last_status_received[robot] = self._received[robot]
-            self._last_status_published[robot] = self._published[robot]
+            self._last_status_pose_published[robot] = (
+                self._pose_published[robot]
+            )
+            self._last_status_pose_suppressed[robot] = (
+                self._pose_suppressed[robot]
+            )
+            self._last_status_imu_published[robot] = (
+                self._imu_published[robot]
+            )
             self._last_status_rejected[robot] = self._rejected[robot]
 
             if received_delta <= 0:
@@ -279,10 +389,20 @@ class SimulatedMocapNode(Node):
                 )
                 continue
 
-            if published_delta <= 0:
+            accounted_pose = (
+                pose_published_delta + pose_suppressed_delta
+            )
+            if accounted_pose <= 0:
                 self.get_logger().warn(
                     f"PX4 state is arriving for {robot}, but simulated "
-                    "MoCap pose/gyro is not being published.",
+                    "MoCap pose processing is stalled.",
+                    throttle_duration_sec=10.0,
+                )
+
+            if imu_published_delta <= 0:
+                self.get_logger().warn(
+                    f"PX4 state is arriving for {robot}, but the simulated "
+                    "IMU stream is stalled.",
                     throttle_duration_sec=10.0,
                 )
 

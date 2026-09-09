@@ -1,4 +1,4 @@
-"""Three-robot SITL through simulated MoCap pose+gyro and revised estimator."""
+"""Three-robot SITL through lab-like simulated MoCap and the EKF."""
 
 from launch import LaunchDescription
 from launch.actions import (
@@ -35,6 +35,18 @@ def _setup(context):
             "output_imu_topic_template": "/mocap/{robot}/imu",
             "pose_frame_id": "mocap_ned",
             "imu_frame_id_template": "{robot}/base_link_frd",
+            "measurement_mode": _perform(
+                context, "mocap_measurement_mode"
+            ),
+            "dropout_start_sec": _perform(
+                context, "mocap_dropout_start_sec"
+            ),
+            "dropout_period_sec": _perform(
+                context, "mocap_dropout_period_sec"
+            ),
+            "dropout_duration_sec": _perform(
+                context, "mocap_dropout_duration_sec"
+            ),
         }.items(),
     )
 
@@ -73,13 +85,14 @@ def _setup(context):
             "input_world_frame": "ned",
             "input_body_frame": "frd",
             "world_to_core_translation": "0,0,0",
-            "use_imu_gyro": "true",
+            "use_imu_gyro": _perform(context, "use_imu_gyro"),
             "imu_body_frame": "frd",
             "publish_tf": _perform(context, "publish_tf"),
             "orientation_measurement_gain": "1.0",
             "orientation_std": "0.005",
             "gyro_time_constant_sec": "0.01",
             "gyro_std": "0.01",
+            "max_coast_sec": "0.0",
         }.items(),
     )
 
@@ -113,6 +126,28 @@ def generate_launch_description() -> LaunchDescription:
             ),
             DeclareLaunchArgument(
                 "publish_tf", default_value="false"
+            ),
+            DeclareLaunchArgument(
+                "use_imu_gyro",
+                default_value="true",
+                description=(
+                    "Use the simulated FRD gyro when fresh. Set false for "
+                    "the no-IMU estimator test."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "mocap_measurement_mode",
+                default_value="ideal",
+                description="ideal | intermittent",
+            ),
+            DeclareLaunchArgument(
+                "mocap_dropout_start_sec", default_value="5.0"
+            ),
+            DeclareLaunchArgument(
+                "mocap_dropout_period_sec", default_value="10.0"
+            ),
+            DeclareLaunchArgument(
+                "mocap_dropout_duration_sec", default_value="2.0"
             ),
             OpaqueFunction(function=_setup),
         ]

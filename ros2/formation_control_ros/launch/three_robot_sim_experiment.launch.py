@@ -17,6 +17,7 @@ def generate_launch_description() -> LaunchDescription:
     px4_dir = LaunchConfiguration("px4_dir")
     world = LaunchConfiguration("world")
     dry_run = LaunchConfiguration("dry_run")
+    initialization_z = LaunchConfiguration("initialization_z")
     leader_reference_mode = LaunchConfiguration("leader_reference_mode")
     state_source = LaunchConfiguration("state_source")
     state_topic_template = LaunchConfiguration("state_topic_template")
@@ -44,6 +45,7 @@ def generate_launch_description() -> LaunchDescription:
         ),
         launch_arguments={
             "dry_run": dry_run,
+            "initialization_z": initialization_z,
             "leader_reference_mode": leader_reference_mode,
             "leader_robot_configuration": "gazebo",
             "follower_left_robot_configuration": "gazebo",
@@ -66,6 +68,11 @@ def generate_launch_description() -> LaunchDescription:
                 default_value="kth_marinarium_docking",
             ),
             DeclareLaunchArgument("dry_run", default_value="false"),
+            DeclareLaunchArgument(
+                "initialization_z",
+                default_value="-1.45",
+                description="Common core-NWU initialization depth [m].",
+            ),
             DeclareLaunchArgument(
                 "leader_reference_mode",
                 default_value="stationary",

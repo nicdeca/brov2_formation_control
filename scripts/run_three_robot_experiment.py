@@ -230,7 +230,9 @@ class ThreeRobotExperimentRunner(Node):
         self.publish_velocity(0.0, -0.10, 0.0, duration=4.0)
         self.settle(8.0)
 
-        self.publish_formation("triangle_high")
+        # Keep both followers at the initialized depth: triangle_compact
+        # has zero vertical relative offsets for both sensing edges.
+        self.publish_formation("triangle_compact")
         self.settle(12.0)
 
         self.publish_velocity(-0.15, 0.0, 0.0, duration=4.0)
@@ -271,7 +273,9 @@ class ThreeRobotExperimentRunner(Node):
         self.publish_velocity(0.0, -0.14, 0.0, duration=5.0)
         self.settle(8.0)
 
-        self.publish_formation("triangle_high")
+        # Keep both followers at the initialized depth throughout the
+        # wet mission; avoid the vertically offset triangle_high formation.
+        self.publish_formation("triangle_wide")
         self.settle(12.0)
 
         self.publish_velocity(-0.20, 0.0, 0.0, duration=7.0)
