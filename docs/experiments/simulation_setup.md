@@ -74,3 +74,21 @@ and inspect:
 ros2 topic echo /mocap/splash/pose_core --once
 ros2 topic echo /mocap/splash/odom_ekf --once
 ```
+
+
+## Pool-centered mission geometry
+
+The maintained two- and three-robot mission launches use the same pool-aligned
+workspace as the wet experiment:
+
+```text
+physical x:      [0.300, 7.100] m
+physical y:      [-1.975, 1.975] m
+conservative x:  [0.450, 6.950] m
+conservative y:  [-1.825, 1.825] m
+```
+
+The x/y center is `[3.70, 0.00]`. Standard mission references and leader
+translations are chosen around this region rather than using one-sided large
+excursions. This both increases workspace reserve and corresponds to the
+preferred MoCap visibility region in the pool.

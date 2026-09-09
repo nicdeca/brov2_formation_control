@@ -8,10 +8,9 @@ from launch_ros.actions import Node
 PHASE_TOPIC = "/formation_control/experiment_phase"
 FORMATION_TOPIC = "/formation_control/desired_formation"
 
-INITIAL_LEADER_XY = [2.675, 0.050]
-INITIAL_LEFT_XY = [4.475, -0.650]
-INITIAL_RIGHT_XY = [4.475, 0.750]
-
+# Parent-minus-follower vectors in pool-aligned core NWU.
+# Absolute initialization targets are derived from the leader x/y/z launch
+# arguments in _setup().
 INITIAL_LEFT = [-1.800, 0.700, 0.000]
 INITIAL_RIGHT = [-1.800, -0.700, 0.000]
 
@@ -23,17 +22,17 @@ FORMATION_NAMES = [
 ]
 
 LEFT_FORMATIONS = [
-    -1.80,  0.70,  0.00,
-    -2.30,  1.15,  0.00,
-    -1.25,  0.35,  0.00,
-    -1.80,  0.70, -0.30,
+    -1.80,  0.70,  0.00,  # triangle_nominal
+    -2.20,  0.95,  0.00,  # triangle_wide
+    -1.40,  0.40,  0.00,  # triangle_compact
+    -1.80,  0.70, -0.30,  # triangle_high (not used by wet missions)
 ]
 
 RIGHT_FORMATIONS = [
-    -1.80, -0.70,  0.00,
-    -2.30, -1.15,  0.00,
-    -1.25, -0.35,  0.00,
-    -1.80, -0.70,  0.30,
+    -1.80, -0.70,  0.00,  # triangle_nominal
+    -2.20, -0.95,  0.00,  # triangle_wide
+    -1.40, -0.40,  0.00,  # triangle_compact
+    -1.80, -0.70,  0.30,  # triangle_high (not used by wet missions)
 ]
 
 
@@ -161,13 +160,31 @@ def _setup(context):
     leader = LaunchConfiguration("leader").perform(context)
     follower_left = LaunchConfiguration("follower_left").perform(context)
     follower_right = LaunchConfiguration("follower_right").perform(context)
+    initialization_x = float(
+        LaunchConfiguration("initialization_x").perform(context)
+    )
+    initialization_y = float(
+        LaunchConfiguration("initialization_y").perform(context)
+    )
     initialization_z = float(
         LaunchConfiguration("initialization_z").perform(context)
     )
 
-    initial_leader_position = [*INITIAL_LEADER_XY, initialization_z]
-    initial_left_position = [*INITIAL_LEFT_XY, initialization_z]
-    initial_right_position = [*INITIAL_RIGHT_XY, initialization_z]
+    initial_leader_position = [
+        initialization_x,
+        initialization_y,
+        initialization_z,
+    ]
+    initial_left_position = [
+        initialization_x - INITIAL_LEFT[0],
+        initialization_y - INITIAL_LEFT[1],
+        initialization_z - INITIAL_LEFT[2],
+    ]
+    initial_right_position = [
+        initialization_x - INITIAL_RIGHT[0],
+        initialization_y - INITIAL_RIGHT[1],
+        initialization_z - INITIAL_RIGHT[2],
+    ]
 
     state_source, template, topic = _state_settings(context)
     common = _common_parameters(context)
@@ -284,6 +301,23 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("follower_right", default_value="itrl_rov_3"),
         DeclareLaunchArgument("dt", default_value="0.02"),
         DeclareLaunchArgument("dry_run", default_value="true"),
+        DeclareLaunchArgument(
+            "initialization_x",
+            default_value="2.500",
+            description=(
+                "Leader initialization x in pool-aligned core NWU [m]. "
+                "For the nominal triangle, this places the formation centroid "
+                "at approximately the pool center x=3.70 m."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "initialization_y",
+            default_value="0.000",
+            description=(
+                "Leader initialization y in pool-aligned core NWU [m]. "
+                "The symmetric triangle is centered about the pool midline."
+            ),
+        ),
         DeclareLaunchArgument(
             "initialization_z",
             default_value="-1.45",

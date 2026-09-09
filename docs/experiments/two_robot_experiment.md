@@ -13,11 +13,11 @@ bubble -> splash
 
 The controller relative vector is `p_parent - p_follower`.
 
-The default initialization is:
+The default pool-centered initialization is:
 
 ```text
-splash = [2.675, 0.050, -1.45]
-bubble = [4.475, 0.750, -1.45]
+splash = [2.675, -0.350, -1.45]
+bubble = [4.475,  0.350, -1.45]
 ```
 
 so
@@ -26,15 +26,27 @@ so
 p_splash - p_bubble = [-1.80, -0.70, 0.00].
 ```
 
-The depth is exposed through:
+The physical workspace center is approximately
+`[3.70, 0.00]` in pool-aligned core NWU. The leader y coordinate is chosen
+slightly negative because the nominal follower lies `0.70 m` on the positive-y
+side of the leader, placing the pair centroid close to the pool midline.
+
+The initialization is exposed through:
 
 ```text
+initialization_x:=2.675
+initialization_y:=-0.350
 initialization_z:=-1.45
 ```
 
-The maintained wet mission keeps leader vertical velocity at zero and does not
-command `pair_high`; routine two-robot wet tests therefore remain around the
-initialization depth.
+Changing `initialization_x` or `initialization_y` translates the whole nominal
+pair consistently; the follower target is derived from the parent-minus-
+follower vector.
+
+The maintained wet profiles keep leader vertical velocity at zero and do not
+command `pair_high`. The cautious and full profiles use symmetric x/y
+excursions about the initialization instead of translating the pair toward one
+side of the tank, so the robots remain close to the central MoCap volume.
 
 ## Real MoCap + EKF
 
