@@ -1,4 +1,4 @@
-"""Launch PX4-SITL -> simulated MoCap pose + FLU gyro."""
+"""Launch the PX4-SITL -> laboratory-like simulated MoCap adapter."""
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
@@ -11,9 +11,9 @@ def _setup(context):
         return LaunchConfiguration(name).perform(context)
 
     robots = [
-        item.strip()
-        for item in arg("robots").split(",")
-        if item.strip()
+        value.strip()
+        for value in arg("robots").split(",")
+        if value.strip()
     ]
     if not robots:
         raise ValueError("robots must contain at least one name")
@@ -41,6 +41,16 @@ def _setup(context):
                     "pose_frame_id": arg("pose_frame_id"),
                     "imu_frame_id_template": arg(
                         "imu_frame_id_template"
+                    ),
+                    "measurement_mode": arg("measurement_mode"),
+                    "dropout_start_sec": float(
+                        arg("dropout_start_sec")
+                    ),
+                    "dropout_period_sec": float(
+                        arg("dropout_period_sec")
+                    ),
+                    "dropout_duration_sec": float(
+                        arg("dropout_duration_sec")
                     ),
                     "status_period_sec": float(
                         arg("status_period_sec")
@@ -72,19 +82,41 @@ def generate_launch_description() -> LaunchDescription:
             ),
             DeclareLaunchArgument(
                 "pose_frame_id",
-                default_value="core_nwu",
+                default_value="mocap_ned",
             ),
             DeclareLaunchArgument(
                 "imu_frame_id_template",
-                default_value="{robot}/base_link",
+                default_value="{robot}/base_link_frd",
+            ),
+            DeclareLaunchArgument(
+                "measurement_mode",
+                default_value="ideal",
+                description="Simulated MoCap pose delivery: ideal or intermittent.",
+            ),
+            DeclareLaunchArgument(
+                "dropout_start_sec",
+                default_value="5.0",
+                description=(
+                    "Intermittent mode: time before the first pose dropout."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "dropout_period_sec",
+                default_value="10.0",
+                description=(
+                    "Intermittent mode: period between dropout-window starts."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "dropout_duration_sec",
+                default_value="2.0",
+                description=(
+                    "Intermittent mode: duration of each suppressed-pose window."
+                ),
             ),
             DeclareLaunchArgument(
                 "status_period_sec",
                 default_value="2.0",
-                description=(
-                    "Health-check interval. Healthy streams are silent; "
-                    "only problems are logged."
-                ),
             ),
             OpaqueFunction(function=_setup),
         ]

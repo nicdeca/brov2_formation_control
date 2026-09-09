@@ -21,9 +21,9 @@ from launch_ros.actions import Node
 PHASE_TOPIC = "/formation_control/experiment_phase"
 FORMATION_TOPIC = "/formation_control/desired_formation"
 
-INITIAL_LEADER_POSITION = [2.675, 0.050, -0.775]
+INITIAL_LEADER_XY = [2.675, 0.050]
 INITIAL_RELATIVE = [-1.800, -0.700, 0.000]
-INITIAL_FOLLOWER_POSITION = [4.475, 0.750, -0.775]
+INITIAL_FOLLOWER_XY = [4.475, 0.750]
 
 FORMATION_NAMES = [
     "adaptive_A",
@@ -49,7 +49,7 @@ def _state_settings(context):
         template = (
             "/{robot}/fmu/out/vehicle_odometry"
             if state_source == "px4"
-            else "/mocap/{robot}/odom"
+            else "/mocap/{robot}/odom_ekf"
         )
 
     if "{robot}" not in template and "{robot_lower}" not in template:
@@ -144,7 +144,7 @@ def _state_launch_arguments():
                 "Per-robot state topic template. Use {robot} or "
                 "{robot_lower}. Empty selects the source default: "
                 "/{robot}/fmu/out/vehicle_odometry for px4, "
-                "/mocap/{robot}/odom for nav_msgs."
+                "/mocap/{robot}/odom_ekf for nav_msgs."
             ),
         ),
         DeclareLaunchArgument(
@@ -168,6 +168,12 @@ def _state_launch_arguments():
 def _setup(context):
     leader = LaunchConfiguration("leader").perform(context)
     follower = LaunchConfiguration("follower").perform(context)
+    initialization_z = float(
+        LaunchConfiguration("initialization_z").perform(context)
+    )
+    initial_leader_position = [*INITIAL_LEADER_XY, initialization_z]
+    initial_follower_position = [*INITIAL_FOLLOWER_XY, initialization_z]
+
     state_source, template, topic = _state_settings(context)
 
     common = _common_parameters(context)
@@ -185,7 +191,7 @@ def _setup(context):
         "self_odometry_topic": topic(follower),
         "parent_odometry_topic": topic(leader),
         "desired_relative_position": INITIAL_RELATIVE,
-        "initialization_position": INITIAL_FOLLOWER_POSITION,
+        "initialization_position": initial_follower_position,
         "experiment_phase_topic": PHASE_TOPIC,
         "desired_formation_topic": FORMATION_TOPIC,
         "formation_names": FORMATION_NAMES,
@@ -252,8 +258,8 @@ def _setup(context):
                 {
                     "robot_names": [leader, follower],
                     "initial_positions": [
-                        *INITIAL_LEADER_POSITION,
-                        *INITIAL_FOLLOWER_POSITION,
+                        *initial_leader_position,
+                        *initial_follower_position,
                     ],
                     "phase_topic": PHASE_TOPIC,
                     "position_tolerance": 0.65,
@@ -283,7 +289,7 @@ def _setup(context):
                     "odometry_topic": topic(leader),
                     "reference_mode": "velocity",
                     "experiment_phase_topic": PHASE_TOPIC,
-                    "initialization_position": INITIAL_LEADER_POSITION,
+                    "initialization_position": initial_leader_position,
                     "position_gain": float(
                         LaunchConfiguration("position_gain").perform(context)
                     ),
@@ -323,6 +329,15 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("follower", default_value="itrl_rov_2"),
         DeclareLaunchArgument("dt", default_value="0.02"),
         DeclareLaunchArgument("dry_run", default_value="true"),
+        DeclareLaunchArgument(
+            "initialization_z",
+            default_value="-1.45",
+            description=(
+                "Common core-NWU initialization depth [m]. The dedicated "
+                "adaptive stress formations may still include vertical "
+                "relative offsets."
+            ),
+        ),
         DeclareLaunchArgument(
             "gazebo_timer",
             default_value="false",

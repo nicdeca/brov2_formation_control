@@ -1,352 +1,269 @@
 # Two-robot experiment
 
-## Topology
+## Physical assignment and topology
 
-Usual physical assignment:
+Current wet-test assignment:
 
 ```text
 leader   = splash
-follower = glub
+follower = bubble
 
-glub -> splash
+bubble -> splash
 ```
 
-Known laboratory dynamics mapping:
+The controller relative vector is `p_parent - p_follower`.
+
+The default pool-centered initialization is:
 
 ```text
-glub    -> heavy_tube
-splash  -> heavy_tube
-bubble  -> standard
+splash = [2.675, -0.350, -1.45]
+bubble = [4.475,  0.350, -1.45]
 ```
 
-The desired relative vector uses the controller convention
+so
 
 ```text
-p_parent - p_follower
+p_splash - p_bubble = [-1.80, -0.70, 0.00].
 ```
 
-For the current two-robot `follower:=glub` / `leader:=splash` launch, the initialization geometry is
+The physical workspace center is approximately
+`[3.70, 0.00]` in pool-aligned core NWU. The leader y coordinate is chosen
+slightly negative because the nominal follower lies `0.70 m` on the positive-y
+side of the leader, placing the pair centroid close to the pool midline.
+
+The initialization is exposed through:
 
 ```text
-splash = [2.675, 0.050, -0.775]
-glub   = [4.475, 0.750, -0.775]
-
-p_splash - p_glub = [-1.800, -0.700, 0.000]
+initialization_x:=2.675
+initialization_y:=-0.350
+initialization_z:=-1.45
 ```
 
-## Four supported state-estimation test modes
+Changing `initialization_x` or `initialization_y` translates the whole nominal
+pair consistently; the follower target is derived from the parent-minus-
+follower vector.
 
-The same controller can be tested in four combinations:
+The maintained wet profiles keep leader vertical velocity at zero and do not
+command `pair_high`. The cautious and full profiles use symmetric x/y
+excursions about the initialization instead of translating the pair toward one
+side of the tank, so the robots remain close to the central MoCap volume.
 
-| environment | state source | controller launch |
-| --- | --- | --- |
-| SITL | PX4 `VehicleOdometry` | `two_robot_experiment.launch.py` |
-| SITL | simulated MoCap + in-repository estimator | `two_robot_experiment_with_ekf_sitl.launch.py` |
-| real robots | PX4 `VehicleOdometry` | `two_robot_experiment.launch.py` |
-| real robots | real MoCap + in-repository estimator | `two_robot_experiment_with_ekf.launch.py` |
+## Real MoCap + EKF
 
-Use `dry_run:=true` first for state/frame checks. The robots do **not** execute
-the initialization maneuver in dry-run mode. Repeat with `dry_run:=false` when
-the state pipeline is verified.
-
----
-
-## 1. SITL using PX4 state directly
-
-### Start Gazebo + PX4
-
-Use the same names as the physical robots:
+Dry run:
 
 ```bash
-ros2 launch formation_control_ros multi_bluerov2_sim.launch.py \
-  robot_count:=2 \
-  robot_1_name:=splash \
-  robot_2_name:=glub \
-  px4_dir:=/home/nicola/Gits/KTH-PX4/PX4-Autopilot
-```
-
-Start the Micro XRCE-DDS agent:
-
-```bash
-micro-xrce-dds-agent udp4 -p 8888
-```
-
-### Dry-run controller
-
-Because hardware-like names would make `auto` choose the physical dynamics
-models, explicitly select `gazebo`:
-
-```bash
-ros2 launch formation_control_ros two_robot_experiment.launch.py \
-  dry_run:=true \
+ros2 launch formation_control_ros \
+  two_robot_experiment_with_ekf.launch.py \
   leader:=splash \
-  follower:=glub \
-  leader_robot_configuration:=gazebo \
-  follower_robot_configuration:=gazebo \
+  follower:=bubble \
+  dry_run:=true \
   leader_reference_mode:=velocity \
-  state_source:=px4 \
   workspace_barrier_enabled:=true \
   workspace_adaptive:=true
 ```
 
-For active initialization/control, change only:
+Active run: change only `dry_run:=false`.
+
+The wrapper defaults to:
 
 ```text
-dry_run:=false
+raw MoCap       = NED / FRD
+EKF output      = core NWU / FLU
+use_imu_gyro    = true, with automatic fallback if unavailable
+max_coast_sec   = 0.0
+initialization_z = -1.45
 ```
 
-The controller consumes:
-
-```text
-/splash/fmu/out/vehicle_odometry
-/glub/fmu/out/vehicle_odometry
-```
-
-and the ROS boundary converts PX4 NED/FRD to core NWU/FLU.
-
----
-
-## 2. SITL using the MoCap estimator
-
-Keep the same Gazebo/PX4 and DDS processes running, then launch:
+## SITL + EKF: ideal MoCap
 
 ```bash
 ros2 launch formation_control_ros \
   two_robot_experiment_with_ekf_sitl.launch.py \
   leader:=splash \
-  follower:=glub \
+  follower:=bubble \
   dry_run:=true \
   leader_reference_mode:=velocity \
-  workspace_barrier_enabled:=true \
-  workspace_adaptive:=true
+  mocap_measurement_mode:=ideal \
+  use_imu_gyro:=true
 ```
 
-This starts the complete simulated sensor/estimator path:
-
-```text
-PX4 VehicleOdometry
-        |
-        v
-simulated_mocap
-   |             |
-   v             v
-/mocap/.../pose  /mocap/.../imu
-        \         /
-         v       v
-       mocap_odom_ekf
-             |
-             +--> /mocap/<robot>/pose_core
-             |
-             +--> /mocap/<robot>/odom_ekf
-                         |
-                         v
-                    controller
-```
-
-The SITL wrapper forces both vehicle models to `gazebo`.
-
-Verify once:
-
-```bash
-ros2 topic echo /mocap/glub/pose --once
-ros2 topic echo /mocap/glub/imu --once
-ros2 topic echo /mocap/glub/pose_core --once
-ros2 topic echo /mocap/glub/odom_ekf --once
-```
-
-and repeat for `splash`.
-
-Healthy MoCap/estimator operation is intentionally quiet. Warnings are printed
-only if state/gyro data stop arriving, measurements are rejected, or gyro
-fusion falls back.
-
-Then repeat the launch with:
-
-```text
-dry_run:=false
-```
-
----
-
-## 3. Real robots using PX4 state directly
-
-Start the physical PX4/network stack, then:
-
-```bash
-ros2 launch formation_control_ros two_robot_experiment.launch.py \
-  dry_run:=true \
-  leader:=splash \
-  follower:=glub \
-  leader_reference_mode:=velocity \
-  state_source:=px4 \
-  workspace_barrier_enabled:=true \
-  workspace_adaptive:=true
-```
-
-For physical robot names, the default `auto` dynamics selection gives:
-
-```text
-splash -> heavy_tube
-glub   -> heavy_tube
-```
-
-After checking state signs, initialization targets, Offboard behavior, and
-workspace margins, repeat with:
-
-```text
-dry_run:=false
-```
-
----
-
-## 4. Real robots using real MoCap + in-repository estimator
-
-The real MoCap system must publish:
-
-```text
-/mocap/splash/pose
-/mocap/glub/pose
-```
-
-The hardware wrapper starts one estimator per robot and configures the
-controllers and phase manager to consume `/mocap/<robot>/odom_ekf`:
+## SITL + EKF: intermittent MoCap, gyro enabled
 
 ```bash
 ros2 launch formation_control_ros \
-  two_robot_experiment_with_ekf.launch.py \
-  dry_run:=true \
+  two_robot_experiment_with_ekf_sitl.launch.py \
   leader:=splash \
-  follower:=glub \
-  leader_reference_mode:=velocity \
-  workspace_barrier_enabled:=true \
-  workspace_adaptive:=true
-```
-
-The estimator output is always:
-
-```text
-world = core NWU
-body  = FLU
-twist = body FLU
-```
-
-The default hardware gyro input is:
-
-```text
-/<robot>/mavros/imu/data
-```
-
-with `imu_body_frame:=flu`.
-
-### If the raw MoCap frame is not already core NWU / FLU
-
-Configure the estimator at the MoCap input boundary:
-
-```text
-input_world_frame:=core_nwu | ros_enu | custom
-input_body_frame:=flu | frd | custom
-world_to_core_translation:=x,y,z
-world_to_core_quaternion_xyzw:=qx,qy,qz,qw
-body_flu_to_input_quaternion_xyzw:=qx,qy,qz,qw
-body_origin_offset_input_body:=x,y,z
-```
-
-Example for a ROS-ENU MoCap world:
-
-```bash
-ros2 launch formation_control_ros \
-  two_robot_experiment_with_ekf.launch.py \
+  follower:=bubble \
   dry_run:=true \
-  leader:=splash \
-  follower:=glub \
   leader_reference_mode:=velocity \
-  input_world_frame:=ros_enu
+  mocap_measurement_mode:=intermittent \
+  mocap_dropout_start_sec:=5.0 \
+  mocap_dropout_period_sec:=10.0 \
+  mocap_dropout_duration_sec:=2.0 \
+  use_imu_gyro:=true
 ```
 
-Before actuation, verify:
+## SITL + EKF: intermittent MoCap, no gyro
 
-```bash
-ros2 topic echo /mocap/glub/pose_core --once
-ros2 topic echo /mocap/glub/odom_ekf --once
-```
-
-`pose_core` is the raw MoCap measurement after only frame/origin calibration;
-`odom_ekf` is the filtered controller-facing state.
-
----
-
-## Recorder
-
-### PX4-controlled run
-
-```bash
-scripts/record_formation_experiment.sh \
-  --name two_robot_experiment_px4 \
-  --robots splash,glub \
-  --edge glub:splash \
-  --state-source px4
-```
-
-### MoCap-estimator-controlled run
-
-```bash
-scripts/record_formation_experiment.sh \
-  --name two_robot_experiment_ekf \
-  --robots splash,glub \
-  --edge glub:splash \
-  --state-source nav_msgs \
-  --state-topic-template '/mocap/{robot}/odom_ekf' \
-  --mocap-world-frame core_nwu \
-  --odom-twist-frame body \
-  --imu-topic-template '/{robot}/mavros/imu/data'
-```
-
-For EKF SITL, use instead:
+Use the same command with:
 
 ```text
---imu-topic-template '/mocap/{robot}/imu'
+use_imu_gyro:=false
 ```
 
-The recorder retains PX4, estimator output, raw MoCap, transformed raw MoCap,
-and gyro streams when available.
-
----
+In both intermittent tests, `/mocap/<robot>/pose` should disappear during the
+dropout windows while `/mocap/<robot>/odom_ekf` continues.
 
 ## Mission runner
 
 ```bash
-python scripts/run_two_robot_experiment.py \
+python3 scripts/run_two_robot_experiment.py \
   --leader splash \
   --profile cautious
 ```
 
-Use `--profile full` only after `cautious` is validated.
-
-Expected experiment phase:
-
-```text
-INITIALIZE -> settle dwell -> FORMATION
-```
-
-The phase manager uses the same selected state source as the controllers.
-
----
-
-## After the run
+After validation:
 
 ```bash
-RUN=$(ls -dt outputs/experiments/*_two_robot_experiment* | head -n 1)
-
-python scripts/export_formation_bag.py "$RUN"
-uv run python scripts/plot_experiment.py "$RUN"
+python3 scripts/run_two_robot_experiment.py \
+  --leader splash \
+  --profile full
 ```
 
-For an EKF recording, the estimator-comparison figures show:
+The `challenging` profile is intended only after the normal wet profiles have
+been validated.
+
+## Recording, export, and plotting
+
+The normal workflow uses one recorder command for the run, followed by one
+export command and one plot command. The latter two automatically process
+**every phase that is present**.
+
+### 1. Record
+
+Start the recorder before arming:
+
+```bash
+scripts/record_formation_experiment.sh \
+  --name two_robot_experiment_ekf \
+  --robots splash,bubble \
+  --edge bubble:splash
+```
+
+For the maintained MoCap/EKF experiments, the recorder defaults are already:
 
 ```text
-PX4
-MoCap estimator
-raw transformed MoCap
+state_source              = nav_msgs
+state_topic_template      = /mocap/{robot}/odom_ekf
+mocap_world_frame         = core_nwu
+odom_twist_frame          = body
+ekf_topic_template        = /mocap/{robot}/odom_ekf
+mocap_pose_topic_template = /mocap/{robot}/pose
+core_pose_topic_template  = /mocap/{robot}/pose_core
+imu_topic_template        = /{robot}/mavros/imu/data
 ```
 
-including raw-MoCap finite-difference velocity diagnostics.
+The recorder also always retains the PX4 state, raw/transformed MoCap, EKF,
+MAVROS gyro, and simulated-MoCap gyro streams when they are present. Therefore
+none of these MoCap-related arguments need to be repeated in a normal wet
+experiment. For a deliberate direct-PX4 controller run, override only:
+
+```text
+--state-source px4
+```
+
+
+The recorder may create:
+
+```text
+<RUN>/initialization/bag
+<RUN>/mission/bag
+```
+
+depending on how far the experiment progressed. For every listed robot it also
+records the parallel state-estimator streams:
+
+```text
+/<robot>/fmu/out/vehicle_odometry
+/mocap/<robot>/pose
+/mocap/<robot>/pose_core
+/mocap/<robot>/odom_ekf
+```
+
+### 2. Export everything that exists
+
+Select the latest run:
+
+```bash
+RUN=$(ls -dt outputs/experiments/* | head -n 1)
+```
+
+Then use the run-level exporter:
+
+```bash
+python3 scripts/export_experiment.py "$RUN"
+```
+
+This single command behaves as follows:
+
+```text
+initialization only  -> exports initialization
+mission only         -> exports mission
+both                 -> exports both
+neither              -> reports an error
+```
+
+When present, the exported histories are:
+
+```text
+$RUN/initialization/initialization_history.npz
+$RUN/mission/formation_history.npz
+```
+
+There is no need to call the phase-specific exporters during the normal
+workflow.
+
+### 3. Plot everything that was exported
+
+Use the run-level plotter:
+
+```bash
+python3 scripts/plot_experiment.py "$RUN" \
+  --mission-preset paper \
+  --format pdf
+```
+
+Again, this is a single command:
+
+```text
+initialization history only  -> plots initialization
+mission history only         -> plots mission
+both                         -> plots both
+neither                      -> reports an error
+```
+
+For each available phase, the plotter also attempts the PX4 / EKF /
+transformed-raw-MoCap comparison. Therefore, when both phases are present, the
+estimator is compared separately during initialization and during the mission.
+
+The output folders are:
+
+```text
+$RUN/initialization/plots/
+$RUN/mission/plots/
+```
+
+whenever the corresponding phase exists.
+
+The lower-level scripts
+
+```text
+export_initialization_bag.py
+export_formation_bag.py
+plot_initialization_experiment.py
+plot_formation_experiment.py
+plot_state_estimator_comparison.py
+```
+
+remain available for debugging, but are not needed for a normal run.

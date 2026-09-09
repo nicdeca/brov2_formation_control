@@ -1,41 +1,19 @@
-# MoCap state estimator: frame contract and tuning
+# MoCap EKF: frame contract, dropout behavior, and standalone debugging
 
-The maintained MoCap state estimator lives in
+## Controller-facing contract
+
+The estimator publishes `/mocap/<robot>/odom_ekf` using one fixed convention:
 
 ```text
-ros2/formation_control_ros/
-├── formation_control_ros/mocap_odom_ekf.py
-└── launch/mocap_odom_ekf.launch.py
+world frame     = core / pool-aligned NWU
+body frame      = FLU
+quaternion      = body FLU -> core NWU
+Odometry.twist  = body FLU
+parent frame    = core_nwu
+child frame     = <robot>/base_link_ekf
 ```
 
-The executable remains named `mocap_odom_ekf` for compatibility, but the
-revised implementation is deliberately simpler and more suitable for
-closed-loop control:
-
-- constant-velocity Kalman filtering for translation;
-- direct gated MoCap attitude updates;
-- body angular velocity from IMU gyro when available;
-- finite-difference MoCap attitude as a fallback angular-rate source.
-
-The previous implementation inferred angular velocity through the covariance
-coupling of a quaternion CV EKF. In aggressive rotations this introduced
-substantial angular-rate and attitude lag. The revised estimator removes that
-source of lag.
-
-## Fixed controller-facing frame contract
-
-Everything published by the estimator has one unambiguous convention:
-
-| quantity | convention |
-|---|---|
-| world frame | core / pool-aligned NWU |
-| body frame | FLU |
-| quaternion | rotation body FLU -> core NWU |
-| `Odometry.twist` | body FLU |
-| output parent frame | `core_nwu` |
-| output child frame | `<robot>/base_link_ekf` (FLU) |
-
-The controller must therefore consume the estimator as
+The controllers therefore consume the EKF as:
 
 ```text
 state_source:=nav_msgs
@@ -43,347 +21,148 @@ mocap_world_frame:=core_nwu
 odom_twist_frame:=body
 ```
 
-No FRD->FLU transform is applied downstream of the estimator.
+## Pool/laboratory raw MoCap convention
 
-## Real MoCap input
-
-The real MoCap bridge publishes a `geometry_msgs/PoseStamped` on
+Wet testing established that the raw laboratory MoCap pose is:
 
 ```text
-/mocap/<robot>/pose
+world = NED
+body  = FRD
 ```
 
-The estimator converts that incoming pose to the fixed core-NWU / FLU contract
-at its input boundary.
-
-This is intentionally configurable because the physical MoCap system may
-differ from the controller in:
-
-- world-axis convention;
-- world origin;
-- rigid-body axis convention;
-- rigid-body reference point.
-
-### World-frame modes
+The maintained estimator defaults are consequently:
 
 ```text
-input_world_frame:=core_nwu
-input_world_frame:=ros_enu
-input_world_frame:=custom
-```
-
-`core_nwu` means that the incoming position/quaternion already use the
-pool-aligned core frame.
-
-`ros_enu` applies
-
-```text
-[x, y, z]_core = [y, -x, z]_ENU
-```
-
-before the optional translation.
-
-`custom` uses
-
-```text
-world_to_core_quaternion_xyzw
-```
-
-as the rotation from incoming-world coordinates to core-NWU coordinates.
-
-For all three modes,
-
-```text
-world_to_core_translation
-```
-
-is added after the world-axis rotation. This is the parameter that handles a
-MoCap origin that is far from the pool/controller origin. An axis conversion
-alone cannot fix an origin offset.
-
-### Incoming body-frame modes
-
-```text
-input_body_frame:=flu
+input_world_frame:=ned
 input_body_frame:=frd
-input_body_frame:=custom
 ```
 
-`flu` means the rigid-body orientation in the incoming PoseStamped already
-describes the robot FLU body.
+No extra frame parameters are required in the normal pool launch.
 
-`frd` applies the proper 180-degree rotation about body +x:
+With
+`S = diag(1,-1,-1)`, the zero-origin-offset conversion is
 
 ```text
-[x, y, z]_FRD = [x, -y, -z]_FLU
+p_NWU = S p_NED
+R_NWU<-FLU = S R_NED<-FRD S
 ```
 
-`custom` uses
+`world_to_core_translation` remains available if the MoCap origin must later
+be shifted relative to the controller pool origin.
 
-```text
-body_flu_to_input_quaternion_xyzw
-```
-
-for an arbitrary fixed rigid-body-axis calibration.
-
-If the MoCap rigid-body origin is not the desired controller body origin, use
-
-```text
-body_origin_offset_input_body
-```
-
-which is the vector from the MoCap pose origin to the controller body origin,
-expressed in the incoming rigid-body frame.
-
-### Transform equations
-
-Let:
-
-- `M` be the incoming MoCap world;
-- `Bm` be the incoming MoCap rigid-body frame;
-- `C` be core NWU;
-- `B` be controller body FLU.
-
-The estimator computes
-
-```text
-p_C = t_C_M + R_C_M ( p_M + R_M_Bm r_Bm_B )
-R_C_B = R_C_M R_M_Bm R_Bm_B
-```
-
-where all configurable transforms above have exactly these meanings.
-
-## Transformed raw MoCap output
-
-Every finite incoming pose is also republished, before estimator gating, as
+The transformed raw measurement is republished on
 
 ```text
 /mocap/<robot>/pose_core
 ```
 
-with
+before estimator gating, so frame conversion and filtering can be inspected
+separately.
+
+## IMU behavior
+
+`use_imu_gyro:=true` is the maintained default. This is opportunistic rather
+than mandatory:
+
+1. if fresh gyro samples are available, the EKF uses them;
+2. if the gyro topic is absent or stale, it automatically uses the
+   finite-difference angular rate reconstructed from accepted MoCap attitudes;
+3. if MoCap is also absent long enough for that finite-difference rate to
+   expire, angular rate falls back to zero.
+
+Only the **gyroscope** is fused by this estimator; accelerometer measurements
+are not currently used.
+
+For explicit no-IMU tests:
 
 ```text
-frame_id = core_nwu
-body convention = FLU
+use_imu_gyro:=false
 ```
 
-This topic is important for experimental diagnostics. It lets the offline
-plots compare:
+## MoCap dropout behavior
+
+Once initialized, the EKF continues predicting and publishing
+`/mocap/<robot>/odom_ekf` during MoCap outages.
+
+Maintained defaults:
 
 ```text
-PX4 estimate
-MoCap estimator output
-raw MoCap after only the frame transform
+publish_rate_hz                       = 80.0
+max_coast_sec                         = 0.0
+mocap_angular_velocity_timeout_sec    = 0.35
+reacquire_after_sec                   = 0.50
+coast_warning_sec                     = 0.50
 ```
 
-without mixing coordinate systems.
+`max_coast_sec=0.0` means unlimited estimator coasting. The controller's own
+freshness check is intentionally unchanged: it continues because the EKF keeps
+publishing fresh predicted odometry.
 
-## Angular velocity
+When MoCap returns after a longer gap, the first valid measurement re-anchors
+position and attitude immediately while preserving the predicted linear
+velocity.
 
-### Preferred path: IMU gyro
-
-The estimator uses gyro by default:
-
-```text
-use_imu_gyro:=true
-```
-
-The hardware convenience launches default to
-
-```text
-/<robot>/mavros/imu/data
-```
-
-and assume
-
-```text
-imu_body_frame:=flu
-```
-
-which is the normal ROS `base_link` convention.
-
-Other supported conventions are
-
-```text
-imu_body_frame:=frd
-imu_body_frame:=custom
-```
-
-For `custom`, provide
-
-```text
-body_flu_to_imu_quaternion_xyzw
-```
-
-The estimator converts the gyro to FLU once at the ROS input boundary and does
-not apply any later FRD/FLU sign changes.
-
-### Gyro filtering
-
-Important parameters:
-
-```text
-gyro_timeout_sec:=0.20
-gyro_time_constant_sec:=0.03
-gyro_std:=0.03
-max_gyro_abs_rad_s:=5.0
-```
-
-If the gyro is missing or stale, the estimator automatically falls back to a
-finite-difference angular velocity reconstructed from successive accepted
-MoCap attitudes.
-
-The status line reports the active source:
-
-```text
-angular_source=gyro
-```
-
-or
-
-```text
-angular_source=mocap_fd
-```
-
-## Attitude behavior
-
-The estimator no longer strongly smooths the MoCap quaternion through a
-constant-angular-velocity EKF.
-
-By default:
-
-```text
-orientation_measurement_gain:=1.0
-orientation_std:=0.015
-```
-
-so every accepted MoCap attitude update is applied directly. This is deliberate
-for feedback control: the previous large attitude/angular-rate lag was more
-damaging than the small high-frequency MoCap noise.
-
-Set `orientation_measurement_gain < 1` only if physical MoCap data show a real
-need for additional smoothing.
-
-## Translation
-
-The translational filter remains a standard constant-velocity Kalman filter.
-
-Defaults:
-
-```text
-position_std:=0.01
-linear_accel_std:=0.7
-initial_velocity_std:=0.5
-max_position_innovation_m:=0.50
-```
-
-Linear velocity is estimated in core-NWU and rotated to body FLU for the
-published Odometry.
-
-## Hardware launch
+## Standalone pool launch
 
 Two robots:
 
 ```bash
-ros2 launch formation_control_ros \
-  two_robot_experiment_with_ekf.launch.py \
-  leader:=splash \
-  follower:=glub \
-  dry_run:=true \
-  leader_reference_mode:=velocity
+ros2 launch formation_control_ros mocap_odom_ekf.launch.py \
+  robots:=splash,bubble
 ```
 
 Three robots:
 
 ```bash
-ros2 launch formation_control_ros \
-  three_robot_experiment_with_ekf.launch.py \
-  leader:=splash \
-  follower_left:=glub \
-  follower_right:=bubble \
-  dry_run:=true \
-  leader_reference_mode:=velocity
+ros2 launch formation_control_ros mocap_odom_ekf.launch.py \
+  robots:=splash,glub,bubble
 ```
 
-These commands assume that the real MoCap PoseStamped is already core-NWU /
-FLU.
+No frame arguments are required: the standalone launch defaults to raw
+NED/FRD input and core-NWU/FLU output.
 
-If the actual lab bridge is standard ENU, for example:
+To explicitly ignore IMU:
 
 ```bash
-ros2 launch formation_control_ros \
-  two_robot_experiment_with_ekf.launch.py \
-  leader:=splash \
-  follower:=glub \
-  dry_run:=true \
-  input_world_frame:=ros_enu
+ros2 launch formation_control_ros mocap_odom_ekf.launch.py \
+  robots:=splash,bubble \
+  use_imu_gyro:=false
 ```
 
-If a translation or arbitrary rigid transform is required, use the `custom`
-parameters documented above.
+## Live checks
 
-## Mandatory real-experiment frame check
-
-Before `dry_run:=false`, verify all three streams:
+Raw laboratory pose:
 
 ```bash
-ros2 topic echo /mocap/glub/pose --once
-ros2 topic echo /mocap/glub/pose_core --once
-ros2 topic echo /mocap/glub/odom_ekf --once
+ros2 topic echo /mocap/splash/pose --once
 ```
 
-Then physically check:
-
-1. moving the robot in core +x increases `pose_core.position.x`;
-2. moving in core +y increases `pose_core.position.y`;
-3. moving upward increases core z;
-4. positive FLU roll/pitch/yaw signs agree with the controller convention;
-5. `/odom_ekf.twist.twist.angular` agrees in sign with the real gyro;
-6. `pose_core` lies inside the configured pool workspace.
-
-This check is especially important if the raw MoCap origin is not the
-pool/controller origin.
-
-## Logging behavior
-
-The MoCap estimator performs an internal health check at
-`status_period_sec` (default `2.0 s`), but **healthy operation is silent**.
-
-It reports only abnormal conditions, including:
-
-- no new MoCap pose samples;
-- pose samples arriving while the estimator cannot initialize;
-- rejected MoCap measurements;
-- missing/stale gyro data when gyro fusion is enabled;
-- fallback from `gyro` to `mocap_fd`;
-- coast timeout or estimator re-anchoring.
-
-The normal startup configuration message is still printed once.
-
-This keeps experiment logs readable while preserving failure diagnostics.
-
-## Quick verification
-
-A healthy real MoCap-estimator pipeline should satisfy:
+Same pose after only the input frame/origin transform:
 
 ```bash
-ros2 topic echo /mocap/glub/pose --once
-ros2 topic echo /mocap/glub/pose_core --once
-ros2 topic echo /mocap/glub/odom_ekf --once
+ros2 topic echo /mocap/splash/pose_core --once
 ```
 
-and, when gyro fusion is enabled:
+Filtered controller-facing state:
 
 ```bash
-ros2 topic echo /glub/mavros/imu/data --once
+ros2 topic echo /mocap/splash/odom_ekf --once
 ```
 
-For SITL, the gyro check is instead:
+Rates:
 
 ```bash
-ros2 topic echo /mocap/glub/imu --once
+ros2 topic hz /mocap/splash/pose
+ros2 topic hz /mocap/splash/odom_ekf
 ```
 
-The absence of periodic INFO status lines is expected when everything is
-working normally.
+During a MoCap outage, `/pose` should stop while `/odom_ekf` continues near the
+configured EKF publication rate.
+
+Useful numerical checks for the current pool configuration:
+
+- core-NWU `z` is negative below the surface;
+- the initialization depth is approximately `z=-1.45 m`;
+- moving in pool/core +x increases `pose_core.position.x`;
+- moving in pool/core +y increases `pose_core.position.y`;
+- a nearly level robot should not be rejected by the body-z tilt gate.

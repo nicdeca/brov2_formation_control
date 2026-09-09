@@ -2,6 +2,9 @@
 """Run reproducible two-BlueROV formation experiments.
 
 Leader velocity commands are expressed in the pool-aligned core NWU frame.
+The absolute mission depth is set by the INITIALIZE targets in the launch
+configuration.  All wet-test profiles below keep leader vertical velocity
+at zero so that the mission remains around that initialized depth.
 
 The script can be started before arming.  It waits for FORMATION and for the
 leader/follower command subscriptions.
@@ -192,73 +195,97 @@ class TwoRobotExperimentRunner(Node):
         self._spin_sleep(duration)
 
     def run_cautious(self) -> None:
-        self.get_logger().info("=== CAUTIOUS TWO-ROBOT EXPERIMENT START ===")
+        """First wet test, kept close to the pool/MoCap center."""
+        self.get_logger().info(
+            "=== CAUTIOUS TWO-ROBOT EXPERIMENT START ==="
+        )
+
         self.publish_formation("pair_nominal")
         self.settle(10.0)
 
         self.publish_formation("pair_far")
-        self.settle(12.0)
+        self.settle(10.0)
+
+        self.publish_formation("pair_nominal")
+        self.settle(8.0)
+
+        # Symmetric +/-0.25 m x excursion about initialization.
+        self.publish_velocity(0.10, 0.0, 0.0, duration=2.5)
+        self.settle(6.0)
+        self.publish_velocity(-0.10, 0.0, 0.0, duration=5.0)
+        self.settle(6.0)
+        self.publish_velocity(0.10, 0.0, 0.0, duration=2.5)
+        self.settle(8.0)
+
+        self.publish_formation("pair_close")
+        self.settle(10.0)
 
         self.publish_formation("pair_nominal")
         self.settle(10.0)
-
-        self.publish_velocity(0.10, 0.0, 0.0, duration=3.0)
-        self.settle(12.0)
-
-        self.publish_velocity(-0.10, 0.0, 0.0, duration=3.0)
-        self.settle(12.0)
-
-        self.publish_formation("pair_close")
-        self.settle(12.0)
-
-        self.publish_formation("pair_nominal")
-        self.settle(12.0)
         self.stop_leader()
-        self.get_logger().info("=== CAUTIOUS TWO-ROBOT EXPERIMENT COMPLETE ===")
+        self.get_logger().info(
+            "=== CAUTIOUS TWO-ROBOT EXPERIMENT COMPLETE ==="
+        )
 
     def run_full(self) -> None:
-        self.get_logger().info("=== FULL TWO-ROBOT EXPERIMENT START ===")
+        """Standard paper experiment centered in the reliable MoCap volume."""
+        self.get_logger().info(
+            "=== FULL TWO-ROBOT EXPERIMENT START ==="
+        )
+
         self.publish_formation("pair_nominal")
         self.settle(8.0)
 
-        self.publish_velocity(0.14, 0.0, 0.0, duration=5.0)
-        self.settle(8.0)
+        # +0.45 m x excursion.
+        self.publish_velocity(0.09, 0.0, 0.0, duration=5.0)
+        self.settle(6.0)
 
         self.publish_formation("pair_far")
-        self.settle(12.0)
-
-        self.publish_formation("pair_close")
-        self.settle(12.0)
-
-        self.publish_velocity(0.0, -0.10, 0.0, duration=3.5)
-        self.settle(8.0)
-
-        self.publish_formation("pair_high")
-        self.settle(12.0)
-
-        self.publish_velocity(-0.14, 0.0, 0.0, duration=5.0)
-        self.settle(8.0)
-
-        self.publish_formation("pair_nominal")
         self.settle(10.0)
 
-        self.publish_velocity(0.0, 0.10, 0.0, duration=3.5)
-        self.settle(12.0)
+        self.publish_formation("pair_close")
+        self.settle(10.0)
+
+        # Cross to -0.45 m relative to initialization.
+        self.publish_velocity(-0.09, 0.0, 0.0, duration=10.0)
+        self.settle(6.0)
+
+        self.publish_formation("pair_nominal")
+        self.settle(8.0)
+
+        # Return to the central x initialization.
+        self.publish_velocity(0.09, 0.0, 0.0, duration=5.0)
+        self.settle(6.0)
+
+        # Symmetric +/-0.20 m y excursion.
+        self.publish_velocity(0.0, -0.08, 0.0, duration=2.5)
+        self.settle(6.0)
+        self.publish_velocity(0.0, 0.08, 0.0, duration=5.0)
+        self.settle(6.0)
+        self.publish_velocity(0.0, -0.08, 0.0, duration=2.5)
+        self.settle(8.0)
+
+        # Keep the wet experiment at the initialized depth. pair_high is
+        # deliberately not used because it moves the follower toward the
+        # near-surface region where MoCap tracking degrades.
+        self.publish_formation("pair_nominal")
+        self.settle(10.0)
         self.stop_leader()
-        self.get_logger().info("=== FULL TWO-ROBOT EXPERIMENT COMPLETE ===")
+        self.get_logger().info(
+            "=== FULL TWO-ROBOT EXPERIMENT COMPLETE ==="
+        )
 
     def run_challenging(self) -> None:
-        """Stress sensing adaptation and moving-leader tracking.
+        """Stress sensing adaptation while remaining pool-centered.
 
-        This profile intentionally requests relative geometries beyond the
-        conservative range/FoV domain while staying inside physical sensing
-        limits.  Run only after cautious and full have been validated.
+        The challenging profile pushes sensing/FoV constraints through the
+        relative-formation references rather than by driving the entire pair
+        toward a pool wall.
         """
         self.get_logger().info(
             "=== CHALLENGING TWO-ROBOT EXPERIMENT START ==="
         )
 
-        # Baseline.
         self.publish_formation("pair_nominal")
         self.settle(6.0)
 
@@ -269,32 +296,35 @@ class TwoRobotExperimentRunner(Node):
         self.publish_formation("pair_nominal")
         self.settle(6.0)
 
-        # Aggressive +y translation: about +1.2 m at 0.30 m/s.
-        self.publish_velocity(0.30, 0.0, 0.0, duration=4.0)
-        self.settle(6.0)
+        # Move +0.40 m in x while remaining near the pool center.
+        self.publish_velocity(0.20, 0.0, 0.0, duration=2.0)
+        self.settle(5.0)
 
         # Horizontal FoV challenge.
         self.publish_formation("pair_fov_edge")
         self.settle(10.0)
 
-        # Simultaneous large x/y leader maneuver, about (+0.8, -0.6) m.
-        self.publish_velocity(-0.15, -0.20, 0.0, duration=4.0)
-        self.settle(6.0)
+        # Move -0.80 m in x, crossing to the opposite side of center.
+        self.publish_velocity(-0.20, 0.0, 0.0, duration=4.0)
+        self.settle(5.0)
 
         # Range-lower-bound challenge: ||d|| ~= 0.70 m.
         self.publish_formation("pair_range_close_edge")
         self.settle(10.0)
 
-        # Fast return in y while close.
-        self.publish_velocity(-0.15, 0.0, 0.0, duration=4.0)
-        self.settle(6.0)
+        # Small symmetric lateral excursion while the pair is compact.
+        self.publish_velocity(0.0, -0.15, 0.0, duration=2.0)
+        self.settle(5.0)
+        self.publish_velocity(0.0, 0.15, 0.0, duration=4.0)
+        self.settle(5.0)
+        self.publish_velocity(0.0, -0.15, 0.0, duration=2.0)
+        self.settle(5.0)
 
-        # Recover nominal geometry before undoing the lateral displacement.
         self.publish_formation("pair_nominal")
         self.settle(8.0)
 
-        # Undo approximately the +0.8 m x displacement.
-        self.publish_velocity(0.0, 0.20, 0.0, duration=4.0)
+        # Return the x coordinate to initialization.
+        self.publish_velocity(0.20, 0.0, 0.0, duration=2.0)
         self.settle(10.0)
 
         self.stop_leader()

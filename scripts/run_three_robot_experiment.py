@@ -211,7 +211,7 @@ class ThreeRobotExperimentRunner(Node):
         self._spin_sleep(duration)
 
     def run_cautious(self) -> None:
-        """Moderate first wet-test experiment."""
+        """Moderate pool-centered first wet-test experiment."""
         self.get_logger().info(
             "=== CAUTIOUS THREE-ROBOT EXPERIMENT START ==="
         )
@@ -219,36 +219,44 @@ class ThreeRobotExperimentRunner(Node):
         self.publish_formation("triangle_nominal")
         self.settle(8.0)
 
-        # +0.60 m in pool-frame x.
-        self.publish_velocity(0.15, 0.0, 0.0, duration=4.0)
-        self.settle(8.0)
+        # Small +x excursion from the pool-centered initialization.
+        self.publish_velocity(0.10, 0.0, 0.0, duration=3.0)
+        self.settle(6.0)
 
         self.publish_formation("triangle_wide")
-        self.settle(12.0)
+        self.settle(10.0)
 
-        # -0.40 m in pool-frame y.
-        self.publish_velocity(0.0, -0.10, 0.0, duration=4.0)
+        self.publish_formation("triangle_compact")
+        self.settle(10.0)
+
+        # Traverse to the opposite side of the central operating region.
+        self.publish_velocity(-0.10, 0.0, 0.0, duration=6.0)
+        self.settle(6.0)
+
+        self.publish_formation("triangle_nominal")
         self.settle(8.0)
 
-        self.publish_formation("triangle_high")
-        self.settle(12.0)
+        # Small symmetric y excursion while using the nominal triangle.
+        self.publish_velocity(0.0, -0.10, 0.0, duration=1.5)
+        self.settle(5.0)
+        self.publish_velocity(0.0, 0.10, 0.0, duration=3.0)
+        self.settle(5.0)
+        self.publish_velocity(0.0, -0.10, 0.0, duration=1.5)
+        self.settle(5.0)
 
-        self.publish_velocity(-0.15, 0.0, 0.0, duration=4.0)
+        # Return x to the initialization value.
+        self.publish_velocity(0.10, 0.0, 0.0, duration=3.0)
         self.settle(8.0)
 
         self.publish_formation("triangle_nominal")
-        self.settle(10.0)
-
-        self.publish_velocity(0.0, 0.10, 0.0, duration=4.0)
-        self.settle(10.0)
-
+        self.settle(8.0)
         self.stop_leader()
         self.get_logger().info(
             "=== CAUTIOUS THREE-ROBOT EXPERIMENT COMPLETE ==="
         )
 
     def run_full(self) -> None:
-        """Large-excursion paper demonstration."""
+        """Paper-oriented experiment centered in the reliable MoCap volume."""
         self.get_logger().info(
             "=== FULL THREE-ROBOT EXPERIMENT START ==="
         )
@@ -256,33 +264,45 @@ class ThreeRobotExperimentRunner(Node):
         self.publish_formation("triangle_nominal")
         self.settle(8.0)
 
-        # +1.40 m in pool-frame x.
-        self.publish_velocity(0.20, 0.0, 0.0, duration=7.0)
-        self.settle(8.0)
+        # +0.50 m in pool-frame x.
+        self.publish_velocity(0.10, 0.0, 0.0, duration=5.0)
+        self.settle(6.0)
+
+        # Formation expansion is performed near y=0, away from both side walls.
+        self.publish_formation("triangle_wide")
+        self.settle(10.0)
+
+        self.publish_formation("triangle_compact")
+        self.settle(10.0)
+
+        # -1.00 m: cross the pool-centered operating region symmetrically.
+        self.publish_velocity(-0.10, 0.0, 0.0, duration=10.0)
+        self.settle(6.0)
 
         self.publish_formation("triangle_wide")
-        self.settle(12.0)
+        self.settle(10.0)
 
-        # Contract before the larger lateral maneuver.
         self.publish_formation("triangle_compact")
-        self.settle(12.0)
+        self.settle(10.0)
 
-        # -0.70 m in pool-frame y.
-        self.publish_velocity(0.0, -0.14, 0.0, duration=5.0)
+        # Return to the central x initialization before lateral maneuvers.
+        self.publish_velocity(0.10, 0.0, 0.0, duration=5.0)
+        self.settle(6.0)
+
+        self.publish_formation("triangle_nominal")
         self.settle(8.0)
 
-        self.publish_formation("triangle_high")
-        self.settle(12.0)
-
-        self.publish_velocity(-0.20, 0.0, 0.0, duration=7.0)
+        # Symmetric +/-0.25 m leader-y excursion. With the nominal triangle,
+        # both followers remain well inside the central MoCap/workspace region.
+        self.publish_velocity(0.0, -0.10, 0.0, duration=2.5)
+        self.settle(6.0)
+        self.publish_velocity(0.0, 0.10, 0.0, duration=5.0)
+        self.settle(6.0)
+        self.publish_velocity(0.0, -0.10, 0.0, duration=2.5)
         self.settle(8.0)
 
         self.publish_formation("triangle_nominal")
-        self.settle(10.0)
-
-        self.publish_velocity(0.0, 0.14, 0.0, duration=5.0)
-        self.settle(12.0)
-
+        self.settle(8.0)
         self.stop_leader()
         self.get_logger().info(
             "=== FULL THREE-ROBOT EXPERIMENT COMPLETE ==="

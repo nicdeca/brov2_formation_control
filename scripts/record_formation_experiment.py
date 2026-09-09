@@ -271,7 +271,7 @@ def write_manifest(
 
 
 def run_postprocessing(run_dir: Path, *, mission_exists: bool) -> None:
-    """Export and plot every phase available in the completed run."""
+    """Export and plot every experiment phase that is available."""
     scripts_dir = Path(__file__).resolve().parent
     export_script = scripts_dir / "export_experiment.py"
     plot_script = scripts_dir / "plot_experiment.py"
@@ -285,9 +285,9 @@ def run_postprocessing(run_dir: Path, *, mission_exists: bool) -> None:
                 file=sys.stderr,
             )
 
-    # `export_experiment.py` and `plot_experiment.py` both skip unavailable
-    # phases. This means a failed initialization run still produces useful
-    # initialization output without requiring a mission bag.
+    # The run-level exporter and plotter discover which split phases are
+    # present. A partial run therefore still produces useful output, while a
+    # complete run processes initialization and mission in the same commands.
     call(
         [sys.executable, str(export_script), str(run_dir)],
         "Export experiment",
@@ -304,10 +304,11 @@ def main() -> None:
     parser.add_argument(
         "--state-source",
         choices=("px4", "nav_msgs"),
-        default="px4",
+        default="nav_msgs",
         help=(
-            "state source used by the controller; stored in the run manifest "
-            "so exported canonical trajectories match the online controller"
+            "state source used by the controller; default: nav_msgs, matching "
+            "the maintained MoCap-EKF experiment path. Use --state-source px4 "
+            "only for an explicit direct-PX4 experiment."
         ),
     )
     parser.add_argument(
@@ -315,7 +316,9 @@ def main() -> None:
         default="",
         help=(
             "per-robot controller state topic template using {robot} or "
-            "{robot_lower}; empty selects the source default"
+            "{robot_lower}; empty selects /mocap/{robot}/odom_ekf for the "
+            "default nav_msgs source, or PX4 VehicleOdometry when explicitly "
+            "using --state-source px4"
         ),
     )
     parser.add_argument(

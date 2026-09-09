@@ -1,4 +1,4 @@
-"""Two-robot SITL through simulated MoCap pose+gyro and revised estimator."""
+"""Two-robot SITL through lab-like simulated MoCap and the EKF."""
 
 from launch import LaunchDescription
 from launch.actions import (
@@ -32,8 +32,20 @@ def _setup(context):
             "input_topic_template": "/{robot}/fmu/out/vehicle_odometry",
             "output_pose_topic_template": "/mocap/{robot}/pose",
             "output_imu_topic_template": "/mocap/{robot}/imu",
-            "pose_frame_id": "core_nwu",
-            "imu_frame_id_template": "{robot}/base_link",
+            "pose_frame_id": "mocap_ned",
+            "imu_frame_id_template": "{robot}/base_link_frd",
+            "measurement_mode": _perform(
+                context, "mocap_measurement_mode"
+            ),
+            "dropout_start_sec": _perform(
+                context, "mocap_dropout_start_sec"
+            ),
+            "dropout_period_sec": _perform(
+                context, "mocap_dropout_period_sec"
+            ),
+            "dropout_duration_sec": _perform(
+                context, "mocap_dropout_duration_sec"
+            ),
         }.items(),
     )
 
@@ -51,6 +63,9 @@ def _setup(context):
             "leader": leader,
             "follower": follower,
             "dry_run": _perform(context, "dry_run"),
+            "initialization_x": _perform(context, "initialization_x"),
+            "initialization_y": _perform(context, "initialization_y"),
+            "initialization_z": _perform(context, "initialization_z"),
             "leader_reference_mode": _perform(
                 context, "leader_reference_mode"
             ),
@@ -66,18 +81,17 @@ def _setup(context):
             "core_pose_topic_template": "/mocap/{robot}/pose_core",
             "odom_topic_template": "/mocap/{robot}/odom_ekf",
             "imu_topic_template": "/mocap/{robot}/imu",
-            "input_world_frame": "core_nwu",
-            "input_body_frame": "flu",
+            "input_world_frame": "ned",
+            "input_body_frame": "frd",
             "world_to_core_translation": "0,0,0",
-            "use_imu_gyro": "true",
-            "imu_body_frame": "flu",
+            "use_imu_gyro": _perform(context, "use_imu_gyro"),
+            "imu_body_frame": "frd",
             "publish_tf": _perform(context, "publish_tf"),
-            # SITL pseudo-MoCap is exact enough that we can use the direct
-            # attitude measurement and a tight nominal measurement std.
             "orientation_measurement_gain": "1.0",
             "orientation_std": "0.005",
             "gyro_time_constant_sec": "0.01",
             "gyro_std": "0.01",
+            "max_coast_sec": "0.0",
         }.items(),
     )
 
@@ -90,6 +104,21 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("leader", default_value="itrl_rov_1"),
             DeclareLaunchArgument("follower", default_value="itrl_rov_2"),
             DeclareLaunchArgument("dry_run", default_value="true"),
+            DeclareLaunchArgument(
+                "initialization_x",
+                default_value="2.675",
+                description="Leader pool-frame initialization x [m].",
+            ),
+            DeclareLaunchArgument(
+                "initialization_y",
+                default_value="-0.350",
+                description="Leader pool-frame initialization y [m].",
+            ),
+            DeclareLaunchArgument(
+                "initialization_z",
+                default_value="-1.45",
+                description="Common core-NWU initialization depth [m].",
+            ),
             DeclareLaunchArgument(
                 "leader_reference_mode",
                 default_value="velocity",
@@ -105,6 +134,28 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument(
                 "publish_tf",
                 default_value="false",
+            ),
+            DeclareLaunchArgument(
+                "use_imu_gyro",
+                default_value="true",
+                description=(
+                    "Use the simulated FRD gyro when fresh. Set false for "
+                    "the no-IMU estimator test."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "mocap_measurement_mode",
+                default_value="ideal",
+                description="ideal | intermittent",
+            ),
+            DeclareLaunchArgument(
+                "mocap_dropout_start_sec", default_value="5.0"
+            ),
+            DeclareLaunchArgument(
+                "mocap_dropout_period_sec", default_value="10.0"
+            ),
+            DeclareLaunchArgument(
+                "mocap_dropout_duration_sec", default_value="2.0"
             ),
             OpaqueFunction(function=_setup),
         ]

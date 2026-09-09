@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
-"""Export initialization and mission data for one experiment run.
+"""Export every available phase of one formation-experiment run.
 
-Typical usage:
+The maintained user-facing exporter uses a single command for the complete
+run directory. It automatically discovers the split phases:
 
-    python scripts/export_experiment.py outputs/experiments/<run>
+    <run>/initialization/bag
+    <run>/mission/bag
 
-By default every phase whose rosbag exists is exported. This is intentionally
-compatible with failed initialization runs, where the mission bag may not
-exist.
+Behavior:
+- initialization only -> export initialization;
+- mission only        -> export mission;
+- both                -> export both;
+- neither             -> fail clearly.
+
+The phase-specific exporters remain available as lower-level debugging tools.
 """
 
 from __future__ import annotations
@@ -26,23 +32,6 @@ def _run(command: list[str], label: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("run_dir", type=Path)
-    parser.add_argument(
-        "--phase",
-        choices=("all", "initialization", "mission"),
-        default="all",
-        help="phase(s) to export; default: all available phases",
-    )
-    parser.add_argument(
-        "--reference-robot",
-        default=None,
-        help="optional reference robot passed to the phase exporters",
-    )
-    parser.add_argument(
-        "--max-sync-ms",
-        type=float,
-        default=None,
-        help="optional synchronization tolerance passed to both exporters",
-    )
     args = parser.parse_args()
 
     run_dir = args.run_dir.expanduser().resolve()
@@ -50,65 +39,66 @@ def main() -> None:
         raise FileNotFoundError(f"run directory does not exist: {run_dir}")
 
     scripts_dir = Path(__file__).resolve().parent
-    initialization_exporter = scripts_dir / "export_initialization_bag.py"
-    mission_exporter = scripts_dir / "export_formation_bag.py"
 
-    requested = (
-        ("initialization", "mission")
-        if args.phase == "all"
-        else (args.phase,)
-    )
+    initialization_bag = run_dir / "initialization" / "bag"
+    mission_bag = run_dir / "mission" / "bag"
 
-    exported: list[str] = []
-    skipped: list[str] = []
+    available = []
+    if initialization_bag.exists():
+        available.append("initialization")
+    if mission_bag.exists():
+        available.append("mission")
 
-    for phase in requested:
-        bag_dir = run_dir / phase / "bag"
-        if not bag_dir.exists():
-            skipped.append(phase)
-            print(
-                f"Skipping {phase}: bag does not exist at {bag_dir}",
-                flush=True,
-            )
-            continue
+    if not available:
+        raise FileNotFoundError(
+            "No experiment phase bag was found. Expected at least one of:\n"
+            f"  - {initialization_bag}\n"
+            f"  - {mission_bag}"
+        )
 
-        if phase == "initialization":
-            command = [
+    exported = []
+
+    if "initialization" in available:
+        _run(
+            [
                 sys.executable,
-                str(initialization_exporter),
+                str(scripts_dir / "export_initialization_bag.py"),
                 str(run_dir),
-            ]
-        else:
-            command = [
+            ],
+            "Export initialization",
+        )
+        history = (
+            run_dir / "initialization" / "initialization_history.npz"
+        )
+        if not history.exists():
+            raise RuntimeError(
+                "Initialization exporter completed but did not create "
+                f"{history}"
+            )
+        exported.append(("initialization", history))
+
+    if "mission" in available:
+        _run(
+            [
                 sys.executable,
-                str(mission_exporter),
+                str(scripts_dir / "export_formation_bag.py"),
                 str(run_dir),
                 "--phase",
                 "mission",
-            ]
-
-        if args.reference_robot is not None:
-            command.extend(["--reference-robot", args.reference_robot])
-        if args.max_sync_ms is not None:
-            command.extend(["--max-sync-ms", str(args.max_sync_ms)])
-
-        _run(command, f"Export {phase}")
-        exported.append(phase)
-
-    if not exported:
-        raise SystemExit(
-            "No phase was exported. Expected initialization/bag and/or "
-            "mission/bag inside the run directory."
+            ],
+            "Export mission",
         )
+        history = run_dir / "mission" / "formation_history.npz"
+        if not history.exists():
+            raise RuntimeError(
+                "Mission exporter completed but did not create "
+                f"{history}"
+            )
+        exported.append(("mission", history))
 
     print("\nExperiment export complete.")
-    print(f"Exported phases: {', '.join(exported)}")
-    if skipped:
-        print(f"Unavailable phases: {', '.join(skipped)}")
-    print(f"Absolute run folder: {run_dir}")
-    for phase in exported:
-        phase_dir = (run_dir / phase).resolve()
-        print(f"Absolute {phase} output folder: {phase_dir}")
+    for phase, history in exported:
+        print(f"{phase.capitalize():14s}: {history}")
 
 
 if __name__ == "__main__":

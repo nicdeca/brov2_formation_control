@@ -45,6 +45,9 @@ _EKF_FORWARD_ARGS = (
     "orientation_std",
     "orientation_measurement_gain",
     "mocap_angular_velocity_time_constant_sec",
+    "mocap_angular_velocity_timeout_sec",
+    "reacquire_after_sec",
+    "coast_warning_sec",
     "max_position_innovation_m",
     "max_orientation_innovation_rad",
     "max_body_z_axis_angle_rad",
@@ -93,6 +96,9 @@ def _setup(context):
             "follower_right": follower_right,
             "dt": _perform(context, "dt"),
             "dry_run": _perform(context, "dry_run"),
+            "initialization_x": _perform(context, "initialization_x"),
+            "initialization_y": _perform(context, "initialization_y"),
+            "initialization_z": _perform(context, "initialization_z"),
             "leader_reference_mode": _perform(
                 context, "leader_reference_mode"
             ),
@@ -148,6 +154,21 @@ def generate_launch_description() -> LaunchDescription:
             ),
             DeclareLaunchArgument("dt", default_value="0.02"),
             DeclareLaunchArgument("dry_run", default_value="true"),
+            DeclareLaunchArgument(
+                "initialization_x",
+                default_value="2.500",
+                description="Leader pool-frame initialization x [m].",
+            ),
+            DeclareLaunchArgument(
+                "initialization_y",
+                default_value="0.000",
+                description="Leader pool-frame initialization y [m].",
+            ),
+            DeclareLaunchArgument(
+                "initialization_z",
+                default_value="-1.45",
+                description="Common core-NWU wet-test initialization depth [m].",
+            ),
             DeclareLaunchArgument(
                 "leader_reference_mode",
                 default_value="stationary",
@@ -212,10 +233,10 @@ def generate_launch_description() -> LaunchDescription:
                 "publish_tf", default_value="false"
             ),
             DeclareLaunchArgument(
-                "input_world_frame", default_value="core_nwu"
+                "input_world_frame", default_value="ned"
             ),
             DeclareLaunchArgument(
-                "input_body_frame", default_value="flu"
+                "input_body_frame", default_value="frd"
             ),
             DeclareLaunchArgument(
                 "world_to_core_translation", default_value="0,0,0"
@@ -233,7 +254,13 @@ def generate_launch_description() -> LaunchDescription:
                 default_value="0,0,0",
             ),
             DeclareLaunchArgument(
-                "use_imu_gyro", default_value="true"
+                "use_imu_gyro",
+                default_value="true",
+                description=(
+                    "Prefer the configured gyro when fresh; automatically "
+                    "fall back when the topic is absent or stale. Set false "
+                    "only for explicit no-IMU tests."
+                ),
             ),
             DeclareLaunchArgument(
                 "imu_body_frame", default_value="flu"
@@ -275,6 +302,18 @@ def generate_launch_description() -> LaunchDescription:
                 default_value="0.05",
             ),
             DeclareLaunchArgument(
+                "mocap_angular_velocity_timeout_sec",
+                default_value="0.35",
+            ),
+            DeclareLaunchArgument(
+                "reacquire_after_sec",
+                default_value="0.50",
+            ),
+            DeclareLaunchArgument(
+                "coast_warning_sec",
+                default_value="0.50",
+            ),
+            DeclareLaunchArgument(
                 "max_position_innovation_m",
                 default_value="0.50",
             ),
@@ -287,7 +326,11 @@ def generate_launch_description() -> LaunchDescription:
                 default_value="1.20",
             ),
             DeclareLaunchArgument(
-                "max_coast_sec", default_value="1.0"
+                "max_coast_sec",
+                default_value="0.0",
+                description=(
+                    "Zero keeps /odom_ekf active through MoCap dropouts."
+                ),
             ),
             DeclareLaunchArgument(
                 "max_rejected_samples", default_value="200"

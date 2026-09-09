@@ -1,27 +1,16 @@
-"""Three-BlueROV formation experiment with selectable state input.
-
-Directed sensing/control graph (follower -> parent):
-
-    robot 2 -> robot 1
-    robot 3 -> robot 1
-
-Default names remain itrl_rov_1, itrl_rov_2, itrl_rov_3. Physical names may
-be supplied at launch time.
-"""
+"""Three-BlueROV formation experiment with selectable state input."""
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
-
 PHASE_TOPIC = "/formation_control/experiment_phase"
 FORMATION_TOPIC = "/formation_control/desired_formation"
 
-INITIAL_LEADER_POSITION = [2.675, 0.050, -0.775]
-INITIAL_LEFT_POSITION = [4.475, -0.650, -0.775]
-INITIAL_RIGHT_POSITION = [4.475, 0.750, -0.775]
-
+# Parent-minus-follower vectors in pool-aligned core NWU.
+# Absolute initialization targets are derived from the leader x/y/z launch
+# arguments in _setup().
 INITIAL_LEFT = [-1.800, 0.700, 0.000]
 INITIAL_RIGHT = [-1.800, -0.700, 0.000]
 
@@ -33,18 +22,19 @@ FORMATION_NAMES = [
 ]
 
 LEFT_FORMATIONS = [
-    -1.80,  0.70,  0.00,
-    -2.30,  1.15,  0.00,
-    -1.25,  0.35,  0.00,
-    -1.80,  0.70, -0.30,
+    -1.80,  0.70,  0.00,  # triangle_nominal
+    -2.20,  0.95,  0.00,  # triangle_wide
+    -1.40,  0.40,  0.00,  # triangle_compact
+    -1.80,  0.70, -0.30,  # triangle_high (not used by wet missions)
 ]
 
 RIGHT_FORMATIONS = [
-    -1.80, -0.70,  0.00,
-    -2.30, -1.15,  0.00,
-    -1.25, -0.35,  0.00,
-    -1.80, -0.70,  0.30,
+    -1.80, -0.70,  0.00,  # triangle_nominal
+    -2.20, -0.95,  0.00,  # triangle_wide
+    -1.40, -0.40,  0.00,  # triangle_compact
+    -1.80, -0.70,  0.30,  # triangle_high (not used by wet missions)
 ]
+
 
 def _state_settings(context):
     state_source = LaunchConfiguration("state_source").perform(context).strip().lower()
@@ -56,7 +46,7 @@ def _state_settings(context):
         template = (
             "/{robot}/fmu/out/vehicle_odometry"
             if state_source == "px4"
-            else "/mocap/{robot}/odom"
+            else "/mocap/{robot}/odom_ekf"
         )
 
     if "{robot}" not in template and "{robot_lower}" not in template:
@@ -66,10 +56,8 @@ def _state_settings(context):
 
     def topic(robot):
         name = str(robot)
-        return (
-            template
-            .replace("{robot}", name)
-            .replace("{robot_lower}", name.lower())
+        return template.replace("{robot}", name).replace(
+            "{robot_lower}", name.lower()
         )
 
     return state_source, template, topic
@@ -80,25 +68,17 @@ def _common_parameters(context):
     return {
         "dt": float(LaunchConfiguration("dt").perform(context)),
         "state_source": state_source,
-        "mocap_world_frame": LaunchConfiguration(
-            "mocap_world_frame"
-        ).perform(context),
-        "odom_twist_frame": LaunchConfiguration(
-            "odom_twist_frame"
-        ).perform(context),
+        "mocap_world_frame": LaunchConfiguration("mocap_world_frame").perform(context),
+        "odom_twist_frame": LaunchConfiguration("odom_twist_frame").perform(context),
         "control_space": "thruster",
         "dry_run": LaunchConfiguration("dry_run").perform(context).lower()
         in ("1", "true", "yes", "on"),
         "workspace_barrier_enabled": (
-            LaunchConfiguration("workspace_barrier_enabled")
-            .perform(context)
-            .lower()
+            LaunchConfiguration("workspace_barrier_enabled").perform(context).lower()
             in ("1", "true", "yes", "on")
         ),
         "workspace_adaptive": (
-            LaunchConfiguration("workspace_adaptive")
-            .perform(context)
-            .lower()
+            LaunchConfiguration("workspace_adaptive").perform(context).lower()
             in ("1", "true", "yes", "on")
         ),
         "workspace_physical_lower": [0.300, -1.975, -2.155],
@@ -119,56 +99,21 @@ def _common_parameters(context):
             LaunchConfiguration("virtual_angular_gain").perform(context)
         ),
         "command_filter_linear_bandwidth": float(
-            LaunchConfiguration(
-                "command_filter_linear_bandwidth"
-            ).perform(context)
+            LaunchConfiguration("command_filter_linear_bandwidth").perform(context)
         ),
         "command_filter_angular_bandwidth": float(
-            LaunchConfiguration(
-                "command_filter_angular_bandwidth"
-            ).perform(context)
+            LaunchConfiguration("command_filter_angular_bandwidth").perform(context)
         ),
-        "alpha_gain": float(
-            LaunchConfiguration("alpha_gain").perform(context)
-        ),
+        "alpha_gain": float(LaunchConfiguration("alpha_gain").perform(context)),
     }
 
 
 def _state_launch_arguments():
     return [
-        DeclareLaunchArgument(
-            "state_source",
-            default_value="px4",
-            description=(
-                "State message type: 'px4' for px4_msgs/VehicleOdometry or "
-                "'nav_msgs' for nav_msgs/Odometry."
-            ),
-        ),
-        DeclareLaunchArgument(
-            "state_topic_template",
-            default_value="",
-            description=(
-                "Per-robot state topic template. Use {robot} or "
-                "{robot_lower}. Empty selects the source default: "
-                "/{robot}/fmu/out/vehicle_odometry for px4, "
-                "/mocap/{robot}/odom for nav_msgs."
-            ),
-        ),
-        DeclareLaunchArgument(
-            "mocap_world_frame",
-            default_value="core_nwu",
-            description=(
-                "World-frame convention for nav_msgs/Odometry: "
-                "'core_nwu' or 'ros_enu'."
-            ),
-        ),
-        DeclareLaunchArgument(
-            "odom_twist_frame",
-            default_value="body",
-            description=(
-                "Twist convention for nav_msgs/Odometry: 'body' or 'world'."
-            ),
-        ),
+        DeclareLaunchArgument("state_source", default_value="px4"),
+        DeclareLaunchArgument("state_topic_template", default_value=""),
+        DeclareLaunchArgument("mocap_world_frame", default_value="core_nwu"),
+        DeclareLaunchArgument("odom_twist_frame", default_value="body"),
     ]
 
 
@@ -215,14 +160,37 @@ def _setup(context):
     leader = LaunchConfiguration("leader").perform(context)
     follower_left = LaunchConfiguration("follower_left").perform(context)
     follower_right = LaunchConfiguration("follower_right").perform(context)
+    initialization_x = float(
+        LaunchConfiguration("initialization_x").perform(context)
+    )
+    initialization_y = float(
+        LaunchConfiguration("initialization_y").perform(context)
+    )
+    initialization_z = float(
+        LaunchConfiguration("initialization_z").perform(context)
+    )
+
+    initial_leader_position = [
+        initialization_x,
+        initialization_y,
+        initialization_z,
+    ]
+    initial_left_position = [
+        initialization_x - INITIAL_LEFT[0],
+        initialization_y - INITIAL_LEFT[1],
+        initialization_z - INITIAL_LEFT[2],
+    ]
+    initial_right_position = [
+        initialization_x - INITIAL_RIGHT[0],
+        initialization_y - INITIAL_RIGHT[1],
+        initialization_z - INITIAL_RIGHT[2],
+    ]
 
     state_source, template, topic = _state_settings(context)
     common = _common_parameters(context)
-    formation_gain = float(
-        LaunchConfiguration("formation_gain").perform(context)
-    )
+    formation_gain = float(LaunchConfiguration("formation_gain").perform(context))
 
-    nodes = [
+    return [
         Node(
             package="formation_control_ros",
             executable="experiment_phase_manager",
@@ -230,15 +198,11 @@ def _setup(context):
             output="screen",
             parameters=[
                 {
-                    "robot_names": [
-                        leader,
-                        follower_left,
-                        follower_right,
-                    ],
+                    "robot_names": [leader, follower_left, follower_right],
                     "initial_positions": [
-                        *INITIAL_LEADER_POSITION,
-                        *INITIAL_LEFT_POSITION,
-                        *INITIAL_RIGHT_POSITION,
+                        *initial_leader_position,
+                        *initial_left_position,
+                        *initial_right_position,
                     ],
                     "phase_topic": PHASE_TOPIC,
                     "position_tolerance": 0.65,
@@ -273,7 +237,7 @@ def _setup(context):
                         "leader_reference_mode"
                     ).perform(context),
                     "experiment_phase_topic": PHASE_TOPIC,
-                    "initialization_position": INITIAL_LEADER_POSITION,
+                    "initialization_position": initial_leader_position,
                     "position_gain": float(
                         LaunchConfiguration("position_gain").perform(context)
                     ),
@@ -294,7 +258,7 @@ def _setup(context):
                 "follower_left_robot_configuration"
             ).perform(context),
             initial_relative=INITIAL_LEFT,
-            initial_position=INITIAL_LEFT_POSITION,
+            initial_position=initial_left_position,
             formations=LEFT_FORMATIONS,
             common=common,
             topic=topic,
@@ -314,7 +278,7 @@ def _setup(context):
                 "follower_right_robot_configuration"
             ).perform(context),
             initial_relative=INITIAL_RIGHT,
-            initial_position=INITIAL_RIGHT_POSITION,
+            initial_position=initial_right_position,
             formations=RIGHT_FORMATIONS,
             common=common,
             topic=topic,
@@ -328,7 +292,6 @@ def _setup(context):
             output="screen",
         ),
     ]
-    return nodes
 
 
 def generate_launch_description() -> LaunchDescription:
@@ -339,42 +302,51 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("dt", default_value="0.02"),
         DeclareLaunchArgument("dry_run", default_value="true"),
         DeclareLaunchArgument(
-            "leader_reference_mode",
-            default_value="stationary",
+            "initialization_x",
+            default_value="2.500",
+            description=(
+                "Leader initialization x in pool-aligned core NWU [m]. "
+                "For the nominal triangle, this places the formation centroid "
+                "at approximately the pool center x=3.70 m."
+            ),
         ),
         DeclareLaunchArgument(
-            "leader_robot_configuration",
-            default_value="auto",
+            "initialization_y",
+            default_value="0.000",
+            description=(
+                "Leader initialization y in pool-aligned core NWU [m]. "
+                "The symmetric triangle is centered about the pool midline."
+            ),
         ),
         DeclareLaunchArgument(
-            "follower_left_robot_configuration",
-            default_value="auto",
+            "initialization_z",
+            default_value="-1.45",
+            description=(
+                "Common core-NWU initialization depth [m]. Negative is down; "
+                "the wet default stays below the near-surface MoCap dropout region."
+            ),
+        ),
+        DeclareLaunchArgument("leader_reference_mode", default_value="stationary"),
+        DeclareLaunchArgument("leader_robot_configuration", default_value="auto"),
+        DeclareLaunchArgument(
+            "follower_left_robot_configuration", default_value="auto"
         ),
         DeclareLaunchArgument(
-            "follower_right_robot_configuration",
-            default_value="auto",
+            "follower_right_robot_configuration", default_value="auto"
         ),
         DeclareLaunchArgument("position_gain", default_value="2.0"),
         DeclareLaunchArgument("formation_gain", default_value="2.0"),
         DeclareLaunchArgument("virtual_linear_gain", default_value="0.55"),
         DeclareLaunchArgument("virtual_angular_gain", default_value="0.80"),
         DeclareLaunchArgument(
-            "command_filter_linear_bandwidth",
-            default_value="3.0",
+            "command_filter_linear_bandwidth", default_value="3.0"
         ),
         DeclareLaunchArgument(
-            "command_filter_angular_bandwidth",
-            default_value="4.0",
+            "command_filter_angular_bandwidth", default_value="4.0"
         ),
         DeclareLaunchArgument("alpha_gain", default_value="1.8"),
-        DeclareLaunchArgument(
-            "workspace_barrier_enabled",
-            default_value="true",
-        ),
-        DeclareLaunchArgument(
-            "workspace_adaptive",
-            default_value="true",
-        ),
+        DeclareLaunchArgument("workspace_barrier_enabled", default_value="true"),
+        DeclareLaunchArgument("workspace_adaptive", default_value="true"),
         *_state_launch_arguments(),
         OpaqueFunction(function=_setup),
     ]

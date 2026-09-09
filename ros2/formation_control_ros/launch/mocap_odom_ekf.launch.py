@@ -122,6 +122,11 @@ def _setup(context):
         "mocap_angular_velocity_time_constant_sec": float(
             arg("mocap_angular_velocity_time_constant_sec")
         ),
+        "mocap_angular_velocity_timeout_sec": float(
+            arg("mocap_angular_velocity_timeout_sec")
+        ),
+        "reacquire_after_sec": float(arg("reacquire_after_sec")),
+        "coast_warning_sec": float(arg("coast_warning_sec")),
         "max_position_innovation_m": float(
             arg("max_position_innovation_m")
         ),
@@ -201,15 +206,15 @@ def generate_launch_description() -> LaunchDescription:
                 "publish_tf",
                 default_value="false",
             ),
-            # Incoming real MoCap convention.
+            # Laboratory MoCap convention (raw pose is NED / FRD).
             DeclareLaunchArgument(
                 "input_world_frame",
-                default_value="core_nwu",
-                description="core_nwu | ros_enu | custom",
+                default_value="ned",
+                description="ned | core_nwu | ros_enu | custom",
             ),
             DeclareLaunchArgument(
                 "input_body_frame",
-                default_value="flu",
+                default_value="frd",
                 description="flu | frd | custom",
             ),
             DeclareLaunchArgument(
@@ -246,6 +251,12 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument(
                 "use_imu_gyro",
                 default_value="true",
+                description=(
+                    "Prefer fresh gyro data when available. If the gyro topic "
+                    "is absent or stale, automatically fall back to MoCap "
+                    "finite differences (and then zero angular rate during a "
+                    "long MoCap outage). Set false only to test without IMU."
+                ),
             ),
             DeclareLaunchArgument(
                 "imu_body_frame",
@@ -298,6 +309,18 @@ def generate_launch_description() -> LaunchDescription:
                 default_value="0.05",
             ),
             DeclareLaunchArgument(
+                "mocap_angular_velocity_timeout_sec",
+                default_value="0.35",
+            ),
+            DeclareLaunchArgument(
+                "reacquire_after_sec",
+                default_value="0.50",
+            ),
+            DeclareLaunchArgument(
+                "coast_warning_sec",
+                default_value="0.50",
+            ),
+            DeclareLaunchArgument(
                 "max_position_innovation_m",
                 default_value="0.50",
             ),
@@ -311,7 +334,11 @@ def generate_launch_description() -> LaunchDescription:
             ),
             DeclareLaunchArgument(
                 "max_coast_sec",
-                default_value="1.0",
+                default_value="0.0",
+                description=(
+                    "Hard coasting limit [s]. Zero keeps prediction and "
+                    "odometry publication active indefinitely."
+                ),
             ),
             DeclareLaunchArgument(
                 "max_rejected_samples",
