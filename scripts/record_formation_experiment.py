@@ -304,10 +304,11 @@ def main() -> None:
     parser.add_argument(
         "--state-source",
         choices=("px4", "nav_msgs"),
-        default="px4",
+        default="nav_msgs",
         help=(
-            "state source used by the controller; stored in the run manifest "
-            "so exported canonical trajectories match the online controller"
+            "state source used by the controller; default: nav_msgs, matching "
+            "the maintained MoCap-EKF experiment path. Use --state-source px4 "
+            "only for an explicit direct-PX4 experiment."
         ),
     )
     parser.add_argument(
@@ -315,7 +316,9 @@ def main() -> None:
         default="",
         help=(
             "per-robot controller state topic template using {robot} or "
-            "{robot_lower}; empty selects the source default"
+            "{robot_lower}; empty selects /mocap/{robot}/odom_ekf for the "
+            "default nav_msgs source, or PX4 VehicleOdometry when explicitly "
+            "using --state-source px4"
         ),
     )
     parser.add_argument(
