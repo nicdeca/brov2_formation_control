@@ -45,6 +45,9 @@ _EKF_FORWARD_ARGS = (
     "orientation_std",
     "orientation_measurement_gain",
     "mocap_angular_velocity_time_constant_sec",
+    "mocap_angular_velocity_timeout_sec",
+    "reacquire_after_sec",
+    "coast_warning_sec",
     "max_position_innovation_m",
     "max_orientation_innovation_rad",
     "max_body_z_axis_angle_rad",
@@ -237,10 +240,11 @@ def generate_launch_description() -> LaunchDescription:
             # Real robot gyro.
             DeclareLaunchArgument(
                 "use_imu_gyro",
-                default_value="false",
+                default_value="true",
                 description=(
-                    "Hardware default: no MAVROS gyro is currently available. "
-                    "The estimator uses MoCap attitude finite differences."
+                    "Prefer the configured gyro when fresh; automatically "
+                    "fall back when the topic is absent or stale. Set false "
+                    "only for explicit no-IMU tests."
                 ),
             ),
             DeclareLaunchArgument(
@@ -283,6 +287,18 @@ def generate_launch_description() -> LaunchDescription:
                 default_value="0.05",
             ),
             DeclareLaunchArgument(
+                "mocap_angular_velocity_timeout_sec",
+                default_value="0.35",
+            ),
+            DeclareLaunchArgument(
+                "reacquire_after_sec",
+                default_value="0.50",
+            ),
+            DeclareLaunchArgument(
+                "coast_warning_sec",
+                default_value="0.50",
+            ),
+            DeclareLaunchArgument(
                 "max_position_innovation_m",
                 default_value="0.50",
             ),
@@ -296,7 +312,10 @@ def generate_launch_description() -> LaunchDescription:
             ),
             DeclareLaunchArgument(
                 "max_coast_sec",
-                default_value="1.0",
+                default_value="0.0",
+                description=(
+                    "Zero keeps /odom_ekf active through MoCap dropouts."
+                ),
             ),
             DeclareLaunchArgument(
                 "max_rejected_samples",

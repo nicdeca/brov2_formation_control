@@ -20,6 +20,8 @@ Estimation structure
     - primary: body-FLU gyro when enabled and fresh;
     - fallback: finite difference of accepted MoCap attitudes, low-pass filtered.
 * Linear velocity output: translational-KF world velocity rotated to body FLU.
+* MoCap dropout handling: once initialized, prediction and odometry publication
+  continue while MoCap is unavailable; returning MoCap re-anchors the estimate.
 
 A transformed raw pose is also published on ``core_pose_topic``.  Recording
 this topic makes it possible to compare PX4, the MoCap estimator, and raw MoCap
@@ -313,6 +315,21 @@ class TranslationalCvKalman:
         )
         self.initialized = True
 
+    def reanchor(
+        self,
+        position: np.ndarray,
+        *,
+        preserve_velocity: bool = True,
+    ) -> None:
+        """Re-anchor position after a long measurement outage."""
+        velocity = (
+            self.velocity_world.copy()
+            if self.initialized and preserve_velocity
+            else np.zeros(3, dtype=float)
+        )
+        self.initialize(position)
+        self.state[3:6] = velocity
+
     def predict(self, dt: float) -> None:
         if not self.initialized:
             return
@@ -440,10 +457,18 @@ class MocapStateEstimatorNode(Node):
             "mocap_angular_velocity_time_constant_sec",
             0.05,
         )
+        self.declare_parameter(
+            "mocap_angular_velocity_timeout_sec",
+            0.35,
+        )
+        self.declare_parameter("reacquire_after_sec", 0.50)
+        self.declare_parameter("coast_warning_sec", 0.50)
         self.declare_parameter("max_position_innovation_m", 0.50)
         self.declare_parameter("max_orientation_innovation_rad", 1.20)
         self.declare_parameter("max_body_z_axis_angle_rad", 1.20)
-        self.declare_parameter("max_coast_sec", 1.0)
+        # Zero means unlimited coasting: once initialized, /odom_ekf keeps
+        # publishing even when MoCap disappears.
+        self.declare_parameter("max_coast_sec", 0.0)
         self.declare_parameter("max_rejected_samples", 200)
         self.declare_parameter("status_period_sec", 2.0)
 
@@ -496,6 +521,17 @@ class MocapStateEstimatorNode(Node):
                 "mocap_angular_velocity_time_constant_sec"
             ).value
         )
+        self._mocap_omega_timeout_sec = float(
+            self.get_parameter(
+                "mocap_angular_velocity_timeout_sec"
+            ).value
+        )
+        self._reacquire_after_sec = float(
+            self.get_parameter("reacquire_after_sec").value
+        )
+        self._coast_warning_sec = float(
+            self.get_parameter("coast_warning_sec").value
+        )
         self._max_orientation_innovation = float(
             self.get_parameter(
                 "max_orientation_innovation_rad"
@@ -518,8 +554,18 @@ class MocapStateEstimatorNode(Node):
 
         if self._publish_rate_hz <= 0.0:
             raise ValueError("publish_rate_hz must be positive")
-        if self._max_coast_sec <= 0.0:
-            raise ValueError("max_coast_sec must be positive")
+        if self._mocap_omega_timeout_sec <= 0.0:
+            raise ValueError(
+                "mocap_angular_velocity_timeout_sec must be positive"
+            )
+        if self._reacquire_after_sec <= 0.0:
+            raise ValueError("reacquire_after_sec must be positive")
+        if self._coast_warning_sec <= 0.0:
+            raise ValueError("coast_warning_sec must be positive")
+        if self._max_coast_sec < 0.0:
+            raise ValueError(
+                "max_coast_sec must be >= 0; zero means unlimited coasting"
+            )
         if self._status_period_sec <= 0.0:
             raise ValueError("status_period_sec must be positive")
 
@@ -626,7 +672,8 @@ class MocapStateEstimatorNode(Node):
             f"  output contract: world=core_nwu, body=FLU\n"
             f"  input MoCap world: {input_world}\n"
             f"  input MoCap body: {input_body}\n"
-            f"  gyro enabled: {self._use_imu_gyro}\n"
+            f"  gyro enabled: {self._use_imu_gyro} "
+            f"(fresh gyro preferred; automatic fallback otherwise)\n"
             f"  gyro topic: {self._imu_topic}\n"
             f"  gyro body frame: {imu_body}\n"
             f"  orientation measurement gain: "
@@ -746,7 +793,12 @@ class MocapStateEstimatorNode(Node):
             <= self._gyro_timeout_sec
         ):
             return self._gyro_body_flu.copy(), "gyro"
-        if self._mocap_omega_body is not None:
+        if (
+            self._mocap_omega_body is not None
+            and self._last_mocap_pose_sec is not None
+            and now - self._last_mocap_pose_sec
+            <= self._mocap_omega_timeout_sec
+        ):
             return self._mocap_omega_body.copy(), "mocap_fd"
         return np.zeros(3, dtype=float), "zero"
 
@@ -852,6 +904,34 @@ class MocapStateEstimatorNode(Node):
                 "body-z tilt gate",
                 position,
                 orientation,
+            )
+            return
+
+        coast_age = (
+            None
+            if self._last_pose_rx_sec is None
+            else max(0.0, now - self._last_pose_rx_sec)
+        )
+        if (
+            coast_age is not None
+            and coast_age > self._reacquire_after_sec
+        ):
+            self._translation.reanchor(
+                position,
+                preserve_velocity=True,
+            )
+            self._orientation_core_flu = orientation.copy()
+            self._mocap_omega_body = None
+            self._last_mocap_orientation = orientation.copy()
+            self._last_mocap_pose_sec = now
+            self._last_pose_rx_sec = now
+            self._pose_accepted += 1
+            self._consecutive_pose_rejections = 0
+            self.get_logger().warn(
+                "MoCap reacquired after "
+                f"{coast_age:.2f} s; re-anchored estimator while "
+                "preserving predicted linear velocity.",
+                throttle_duration_sec=2.0,
             )
             return
 
@@ -1042,11 +1122,18 @@ class MocapStateEstimatorNode(Node):
             return
 
         now = self._now_sec()
-        if now - self._last_pose_rx_sec > self._max_coast_sec:
+        coast_age = max(0.0, now - self._last_pose_rx_sec)
+
+        # Maintained default: unlimited coasting.  A positive max_coast_sec
+        # remains available only as an explicit opt-in hard stop.
+        if (
+            self._max_coast_sec > 0.0
+            and coast_age > self._max_coast_sec
+        ):
             self._reset_after_coast()
             self.get_logger().warn(
-                "MoCap coast timeout exceeded; estimator will "
-                "reinitialize on the next accepted pose."
+                "Configured max_coast_sec exceeded; estimator stopped "
+                "publishing and will reinitialize on the next accepted pose."
             )
             return
 
@@ -1184,10 +1271,21 @@ class MocapStateEstimatorNode(Node):
         self._last_status_gyro_rx = self._gyro_rx
 
         if pose_delta <= 0:
-            self.get_logger().warn(
-                f"No new MoCap poses on {self._pose_topic}.",
-                throttle_duration_sec=10.0,
-            )
+            if initialized and self._last_pose_rx_sec is not None:
+                coast_age = max(0.0, now - self._last_pose_rx_sec)
+                if coast_age >= self._coast_warning_sec:
+                    self.get_logger().warn(
+                        f"No new MoCap poses on {self._pose_topic} for "
+                        f"{coast_age:.2f} s; estimator is coasting and "
+                        f"{self._odom_topic} remains active.",
+                        throttle_duration_sec=10.0,
+                    )
+            else:
+                self.get_logger().warn(
+                    f"No new MoCap poses on {self._pose_topic}; estimator "
+                    "has not initialized yet.",
+                    throttle_duration_sec=10.0,
+                )
             return
 
         if not initialized:

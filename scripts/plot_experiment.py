@@ -3,7 +3,7 @@
 
 Typical usage:
 
-    uv run python scripts/plot_experiment.py outputs/experiments/<run>
+    python3 scripts/plot_experiment.py outputs/experiments/<run>
 
 By default every exported phase history that exists is plotted and saved in
 its own phase-specific ``plots/`` directory.

@@ -1,111 +1,83 @@
-# Simulated MoCap and gyro for EKF SITL validation
+# Simulated MoCap
 
-PX4/Gazebo SITL does not provide the physical experiment topics
-
-```text
-/mocap/<robot>/pose
-/<robot>/mavros/imu/data
-```
-
-The maintained `simulated_mocap` node creates a software-equivalent sensor
-interface from PX4 SITL `VehicleOdometry`.
-
-## SITL signal path
+The SITL MoCap adapter intentionally reproduces the **raw laboratory MoCap
+interface**, rather than publishing controller-ready states directly.
 
 ```text
-/<robot>/fmu/out/vehicle_odometry
-                 |
-                 | formation_control_ros PX4 state conversion
-                 v
-       simulated_mocap
-          |             |
-          |             +--> /mocap/<robot>/imu
-          |                    body FLU gyro
-          v
-/mocap/<robot>/pose
-core NWU / FLU
-          |
-          v
-    mocap_odom_ekf
-          |
-          +--> /mocap/<robot>/pose_core
-          |
-          +--> /mocap/<robot>/odom_ekf
-                       |
-                       v
-                 controller
+PX4 VehicleOdometry
+        |
+        v
+trusted state adapter (core NWU / FLU)
+        |
+        v
+simulated raw MoCap (NED / FRD)
+        |
+        v
+mocap_odom_ekf
+        |
+        v
+controller state (core NWU / FLU)
 ```
 
-The simulated pose and gyro are both derived from PX4 odometry. Therefore this
-test validates software integration and frame handling; it is not an
-independent estimator benchmark.
+This makes SITL exercise the same frame-conversion boundary as the wet
+experiment.
 
-## Two robots
+## Measurement modes
 
-Start Gazebo/PX4:
-
-```bash
-ros2 launch formation_control_ros multi_bluerov2_sim.launch.py \
-  robot_count:=2 \
-  robot_1_name:=splash \
-  robot_2_name:=glub \
-  px4_dir:=/home/nicola/Gits/KTH-PX4/PX4-Autopilot
-```
-
-Start the DDS agent:
-
-```bash
-micro-xrce-dds-agent udp4 -p 8888
-```
-
-Then validate the complete estimator path:
-
-```bash
-ros2 launch formation_control_ros \
-  two_robot_experiment_with_ekf_sitl.launch.py \
-  leader:=splash \
-  follower:=glub \
-  dry_run:=true \
-  leader_reference_mode:=velocity \
-  workspace_barrier_enabled:=true \
-  workspace_adaptive:=true
-```
-
-Check:
-
-```bash
-ros2 topic echo /mocap/glub/pose --once
-ros2 topic echo /mocap/glub/imu --once
-ros2 topic echo /mocap/glub/pose_core --once
-ros2 topic echo /mocap/glub/odom_ekf --once
-```
-
-The estimator status should report
+The simulated pose stream has two modes:
 
 ```text
-angular_source=gyro
+measurement_mode:=ideal
+measurement_mode:=intermittent
 ```
 
-For active SITL initialization/control, repeat with
+`ideal` publishes every valid pose.
+
+`intermittent` periodically suppresses only `/mocap/<robot>/pose`. By default:
 
 ```text
-dry_run:=false
+dropout_start_sec    = 5.0
+dropout_period_sec   = 10.0
+dropout_duration_sec = 2.0
 ```
 
-## Three robots
+Thus, after a 5 s initialization period, the pose disappears for 2 s every
+10 s. The pseudo-IMU continues throughout the dropout.
 
-Use the corresponding simulator command with `splash`, `glub`, and `bubble`,
-then:
+The two/three-robot SITL wrappers expose these as:
+
+```text
+mocap_measurement_mode
+mocap_dropout_start_sec
+mocap_dropout_period_sec
+mocap_dropout_duration_sec
+```
+
+They also expose:
+
+```text
+use_imu_gyro:=true|false
+```
+
+so the same intermittent pose pattern can be tested with and without gyro
+assistance.
+
+## Standalone adapter example
 
 ```bash
-ros2 launch formation_control_ros \
-  three_robot_experiment_with_ekf_sitl.launch.py \
-  leader:=splash \
-  follower_left:=glub \
-  follower_right:=bubble \
-  dry_run:=true \
-  leader_reference_mode:=velocity
+ros2 launch formation_control_ros simulated_mocap.launch.py \
+  robots:=splash,bubble \
+  measurement_mode:=intermittent \
+  dropout_start_sec:=5.0 \
+  dropout_period_sec:=10.0 \
+  dropout_duration_sec:=2.0
 ```
 
-The wrapper explicitly forces the `gazebo` dynamics preset even though the
-robot names match the physical vehicles.
+Inspect:
+
+```bash
+ros2 topic hz /mocap/splash/pose
+ros2 topic hz /mocap/splash/imu
+```
+
+The IMU remains continuous while the pose exhibits the requested gaps.
