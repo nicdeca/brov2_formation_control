@@ -15,12 +15,11 @@ from launch_ros.actions import Node
 PHASE_TOPIC = "/formation_control/experiment_phase"
 FORMATION_TOPIC = "/formation_control/desired_formation"
 
-# Pool-aligned core-NWU horizontal initialization geometry.  The z coordinate
-# is resolved from the initialization_z launch argument in _setup().
-INITIAL_LEADER_XY = [2.675, 0.050]
-INITIAL_FOLLOWER_XY = [4.475, 0.750]
-
 # Parent-minus-follower vector in pool-aligned core NWU.
+#
+# The leader initialization x/y are launch arguments. The follower target is
+# derived from this vector so the absolute targets and formation geometry can
+# never become inconsistent.
 INITIAL_RELATIVE = [-1.800, -0.700, 0.000]
 
 FORMATION_NAMES = [
@@ -155,11 +154,25 @@ def _state_launch_arguments():
 def _setup(context):
     leader = LaunchConfiguration("leader").perform(context)
     follower = LaunchConfiguration("follower").perform(context)
+    initialization_x = float(
+        LaunchConfiguration("initialization_x").perform(context)
+    )
+    initialization_y = float(
+        LaunchConfiguration("initialization_y").perform(context)
+    )
     initialization_z = float(
         LaunchConfiguration("initialization_z").perform(context)
     )
-    initial_leader_position = [*INITIAL_LEADER_XY, initialization_z]
-    initial_follower_position = [*INITIAL_FOLLOWER_XY, initialization_z]
+    initial_leader_position = [
+        initialization_x,
+        initialization_y,
+        initialization_z,
+    ]
+    initial_follower_position = [
+        initialization_x - INITIAL_RELATIVE[0],
+        initialization_y - INITIAL_RELATIVE[1],
+        initialization_z - INITIAL_RELATIVE[2],
+    ]
 
     state_source, template, topic = _state_settings(context)
     common = _common_parameters(context)
@@ -271,6 +284,22 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("follower", default_value="itrl_rov_2"),
         DeclareLaunchArgument("dt", default_value="0.02"),
         DeclareLaunchArgument("dry_run", default_value="true"),
+        DeclareLaunchArgument(
+            "initialization_x",
+            default_value="2.675",
+            description=(
+                "Leader initialization x in pool-aligned core NWU [m]. "
+                "The default keeps the two-robot formation near the pool center."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "initialization_y",
+            default_value="-0.350",
+            description=(
+                "Leader initialization y in pool-aligned core NWU [m]. "
+                "With the nominal +0.70 m follower offset, this centers the pair."
+            ),
+        ),
         DeclareLaunchArgument(
             "initialization_z",
             default_value="-1.45",

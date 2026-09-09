@@ -15,25 +15,53 @@ glub   -> splash
 bubble -> splash
 ```
 
-Default core-NWU initialization:
+Default pool-centered core-NWU initialization:
 
 ```text
-splash = [2.675,  0.050, -1.45]
-glub   = [4.475, -0.650, -1.45]
-bubble = [4.475,  0.750, -1.45]
+splash = [2.500,  0.000, -1.45]
+glub   = [4.300, -0.700, -1.45]
+bubble = [4.300,  0.700, -1.45]
 ```
 
-The depth is exposed as `initialization_z` and defaults to `-1.45 m`.
+The nominal triangle centroid is therefore approximately
+`[3.70, 0.00]`, matching the center of the configured x/y workspace.
 
-## Wet mission stays at depth
+The leader initialization is exposed as:
 
-The maintained `run_three_robot_experiment.py` does **not** command
-`triangle_high`. All formation references used by the cautious and full wet
-profiles have zero vertical relative offsets, and all leader velocity commands
-use `v_z=0`.
+```text
+initialization_x:=2.500
+initialization_y:=0.000
+initialization_z:=-1.45
+```
 
-`triangle_high` remains available in the formation library for deliberate
-vertical tests, but is not part of the standard wet mission.
+Both follower initialization targets are derived automatically from the
+parent-minus-follower vectors, so translating the leader initialization moves
+the whole triangle consistently.
+
+## Pool-centered wet mission
+
+The standard cautious and full missions stay at `z=-1.45 m` and deliberately
+keep the formation near the center of the pool in x and y.
+
+The maintained formation library uses:
+
+```text
+triangle_nominal:  [-1.80, +/-0.70, 0.00]
+triangle_wide:     [-2.20, +/-0.95, 0.00]
+triangle_compact:  [-1.40, +/-0.40, 0.00]
+```
+
+The full mission uses symmetric leader excursions:
+
+```text
+x: 0 -> +0.50 -> -0.50 -> 0 m relative to initialization
+y: 0 -> -0.25 -> +0.25 -> 0 m relative to initialization
+```
+
+The wide triangle is commanded only while the leader is close to `y=0`.
+Consequently the planned follower references remain far from both y walls.
+`triangle_high` remains available for deliberate vertical tests but is not
+used by the standard wet missions.
 
 ## Real MoCap + EKF
 

@@ -65,6 +65,8 @@ def _setup(context):
             "follower_left": follower_left,
             "follower_right": follower_right,
             "dry_run": _perform(context, "dry_run"),
+            "initialization_x": _perform(context, "initialization_x"),
+            "initialization_y": _perform(context, "initialization_y"),
             "initialization_z": _perform(context, "initialization_z"),
             "leader_reference_mode": _perform(
                 context, "leader_reference_mode"
@@ -110,6 +112,16 @@ def generate_launch_description() -> LaunchDescription:
                 "follower_right", default_value="itrl_rov_3"
             ),
             DeclareLaunchArgument("dry_run", default_value="true"),
+            DeclareLaunchArgument(
+                "initialization_x",
+                default_value="2.500",
+                description="Leader pool-frame initialization x [m].",
+            ),
+            DeclareLaunchArgument(
+                "initialization_y",
+                default_value="0.000",
+                description="Leader pool-frame initialization y [m].",
+            ),
             DeclareLaunchArgument(
                 "initialization_z",
                 default_value="-1.45",
