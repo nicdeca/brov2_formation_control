@@ -1,5 +1,22 @@
 # Recording and comparing PX4, EKF, and raw MoCap
 
+## Recorder defaults for MoCap/EKF experiments
+
+The maintained recorder defaults already match the MoCap/EKF controller path:
+
+```text
+state_source          = nav_msgs
+state_topic_template  = /mocap/{robot}/odom_ekf
+mocap_world_frame     = core_nwu
+odom_twist_frame      = body
+imu_topic_template    = /{robot}/mavros/imu/data
+```
+
+The bag also always includes PX4 VehicleOdometry, raw MoCap, transformed
+`pose_core`, `/odom_ekf`, MAVROS IMU, and simulated-MoCap IMU topics when
+present. A normal wet-test recorder command therefore needs only the run name,
+robot list, and sensing edges.
+
 The comparison workflow records:
 
 ```text

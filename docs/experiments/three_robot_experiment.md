@@ -127,13 +127,31 @@ scripts/record_formation_experiment.sh \
   --name three_robot_experiment_ekf \
   --robots splash,glub,bubble \
   --edge glub:splash \
-  --edge bubble:splash \
-  --state-source nav_msgs \
-  --state-topic-template '/mocap/{robot}/odom_ekf' \
-  --mocap-world-frame core_nwu \
-  --odom-twist-frame body \
-  --imu-topic-template '/{robot}/mavros/imu/data'
+  --edge bubble:splash
 ```
+
+For the maintained MoCap/EKF experiments, the recorder defaults are already:
+
+```text
+state_source              = nav_msgs
+state_topic_template      = /mocap/{robot}/odom_ekf
+mocap_world_frame         = core_nwu
+odom_twist_frame          = body
+ekf_topic_template        = /mocap/{robot}/odom_ekf
+mocap_pose_topic_template = /mocap/{robot}/pose
+core_pose_topic_template  = /mocap/{robot}/pose_core
+imu_topic_template        = /{robot}/mavros/imu/data
+```
+
+The recorder also always retains the PX4 state, raw/transformed MoCap, EKF,
+MAVROS gyro, and simulated-MoCap gyro streams when they are present. Therefore
+none of these MoCap-related arguments need to be repeated in a normal wet
+experiment. For a deliberate direct-PX4 controller run, override only:
+
+```text
+--state-source px4
+```
+
 
 The recorder may create:
 
