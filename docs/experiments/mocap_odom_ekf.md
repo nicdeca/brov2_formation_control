@@ -166,3 +166,110 @@ Useful numerical checks for the current pool configuration:
 - moving in pool/core +x increases `pose_core.position.x`;
 - moving in pool/core +y increases `pose_core.position.y`;
 - a nearly level robot should not be rejected by the body-z tilt gate.
+
+
+## Standalone EKF recording and plotting
+
+When debugging the estimator independently of the formation controller, first
+launch the estimator normally.
+
+Two robots:
+
+```bash
+ros2 launch formation_control_ros mocap_odom_ekf.launch.py \
+  robots:=splash,bubble
+```
+
+Three robots:
+
+```bash
+ros2 launch formation_control_ros mocap_odom_ekf.launch.py \
+  robots:=splash,glub,bubble
+```
+
+In another terminal, start the dedicated recorder.
+
+Two robots:
+
+```bash
+scripts/record_mocap_ekf.sh \
+  --name two_robot_ekf_check \
+  --robots splash,bubble
+```
+
+Three robots:
+
+```bash
+scripts/record_mocap_ekf.sh \
+  --name three_robot_ekf_check \
+  --robots splash,glub,bubble
+```
+
+The recorder runs until `Ctrl+C` and stores the session under:
+
+```text
+outputs/ekf_checks/<timestamp>_<name>/
+```
+
+By default, stopping the recorder automatically exports and plots the run.
+
+The recorded streams are, when available:
+
+```text
+/mocap/<robot>/pose
+/mocap/<robot>/pose_core
+/mocap/<robot>/odom_ekf
+/<robot>/fmu/out/vehicle_odometry
+/<robot>/mavros/imu/data
+/mocap/<robot>/imu
+```
+
+The output plots include, for each robot:
+
+```text
+standalone_ekf_state_<robot>.pdf
+standalone_ekf_error_<robot>.pdf
+standalone_ekf_stream_availability_<robot>.pdf
+standalone_ekf_stream_timing_<robot>.pdf
+```
+
+The state figure overlays the EKF with transformed raw MoCap and PX4 whenever
+those comparison streams are available. The timing figures make MoCap
+dropouts and gyro availability directly visible.
+
+The terminal also prints, for every stream:
+
+```text
+sample count
+approximate publication rate
+maximum inter-message gap
+```
+
+To record for a fixed interval instead of stopping manually:
+
+```bash
+scripts/record_mocap_ekf.sh \
+  --name two_robot_ekf_check \
+  --robots splash,bubble \
+  --duration 30
+```
+
+To record without automatic post-processing:
+
+```text
+--no-postprocess
+```
+
+To rerun the plots later:
+
+```bash
+RUN=$(ls -dt outputs/ekf_checks/* | head -n 1)
+
+python3 scripts/plot_mocap_ekf.py \
+  "$RUN" \
+  --save \
+  --format pdf
+```
+
+This plotting command also re-exports the bag by default, so there is no
+separate export command in the normal standalone-EKF workflow.

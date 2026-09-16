@@ -126,3 +126,30 @@ controller                -> continues receiving fresh odometry
 
 With `use_imu_gyro:=false`, `/mocap/<robot>/imu` may still exist in SITL but
 the EKF deliberately ignores it.
+
+
+## Standalone real-EKF check
+
+Two robots:
+
+```bash
+ros2 launch formation_control_ros mocap_odom_ekf.launch.py \
+  robots:=splash,bubble
+```
+
+In another terminal:
+
+```bash
+scripts/record_mocap_ekf.sh \
+  --name two_robot_ekf_check \
+  --robots splash,bubble
+```
+
+Stop with `Ctrl+C`; export and plotting are automatic.
+
+Three robots use the same two commands with:
+
+```text
+robots:=splash,glub,bubble
+--robots splash,glub,bubble
+```
