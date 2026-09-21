@@ -98,7 +98,7 @@ and pass each value to the corresponding leader/follower controller.
 Only the three virtual robots should be spawned in Gazebo. Do **not** create
 simulated copies of `splash` or `glub`.
 
-From `~/discower_ws`:
+From the repository root:
 
 ```bash
 ros2 launch formation_control_ros multi_bluerov2_sim.launch.py \
@@ -109,7 +109,7 @@ ros2 launch formation_control_ros multi_bluerov2_sim.launch.py \
   rov_1_pose:="-1.050,2.675,-1.275,0,0,-1.57079632679" \
   rov_2_pose:="-1.700,4.775,-1.275,0,0,-1.57079632679" \
   rov_3_pose:="-1.550,5.775,-1.275,0,0,-1.57079632679" \
-  px4_dir:=/home/nicola/Gits/KTH-PX4/PX4-Autopilot
+  px4_dir:=$PX4_AUTOPILOT_DIR
 ```
 
 The three Gazebo poses correspond to robots 1, 3, and 5 of the original

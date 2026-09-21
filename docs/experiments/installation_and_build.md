@@ -2,48 +2,85 @@
 
 ## Repository and workspace
 
-Expected workspace layout:
+The ROS 2 package is intended to be cloned inside the `src/` directory of a
+colcon workspace:
 
 ```text
-~/discower_ws/
+ros2_ws/
 └── src/
-    └── brov2_formation_control/
+    └── brov2_formation_control/   # repository root
 ```
 
-The commands below assume ROS 2 Jazzy.
+The commands below assume ROS 2 Jazzy and, unless stated otherwise, are run
+from the repository root. Repository and workspace paths are kept relative so
+the instructions are independent of the local checkout location.
+
+## Core Python environment
+
+The ROS-independent package uses Python 3.12+ and [`uv`](https://docs.astral.sh/uv/):
+
+```bash
+uv sync
+```
+
+For ROS-aware tools, `setup_ros2.sh` creates the local `.venv-ros` environment
+on first use and installs the core package in editable mode. The environment is
+local-only and must not be committed to Git.
+
+```bash
+source setup_ros2.sh
+```
+
+`setup_ros2.sh` also sources the standard ROS 2 Jazzy installation and, when
+available, the surrounding workspace `install/setup.bash`.
 
 ## Build the ROS package
 
+From the repository root, move to the colcon workspace root, build, then return
+to the repository:
+
 ```bash
-cd ~/discower_ws
+source setup_ros2.sh
 
-source /opt/ros/jazzy/setup.bash
-source ~/discower_ws/src/brov2_formation_control/setup_ros2.sh
-
+cd ../..
 colcon build \
   --packages-select formation_control_ros \
   --symlink-install
 
-source ~/discower_ws/install/setup.bash
+source install/setup.bash
+cd src/brov2_formation_control
 ```
 
 After substantial ROS-package changes, a clean package rebuild can avoid stale
 installed entry points:
 
 ```bash
-cd ~/discower_ws
+cd ../..
 rm -rf build/formation_control_ros install/formation_control_ros
 source src/brov2_formation_control/setup_ros2.sh
 colcon build --packages-select formation_control_ros --symlink-install
 source install/setup.bash
+cd src/brov2_formation_control
 ```
 
-If the generated ROS Python entry points contain an invalid interpreter line,
-use the repository workaround:
+If generated ROS Python entry points contain an invalid interpreter line, use
+the repository workaround from the repository root:
 
 ```bash
-bash src/brov2_formation_control/scripts/fix_ros2_shebangs.sh
+bash scripts/fix_ros2_shebangs.sh
 ```
+
+## PX4 checkout
+
+SITL launch files accept the PX4 checkout through the `px4_dir` launch
+argument. For portable commands, set the environment variable
+`PX4_AUTOPILOT_DIR` to your PX4-Autopilot checkout and use
+
+```text
+px4_dir:="$PX4_AUTOPILOT_DIR"
+```
+
+in launch commands. No user-specific PX4 path is assumed by the documentation.
 
 ## Offline / experiment scripts
 
@@ -69,12 +106,10 @@ frame.
 
 ## Environments
 
-For ROS-aware scripts such as bag exporters:
+For ROS-aware scripts such as bag exporters, from the repository root:
 
 ```bash
-cd ~/discower_ws/src/brov2_formation_control
 source setup_ros2.sh
-source ~/discower_ws/install/setup.bash
 ```
 
 The umbrella plotter and the standard mission plotter are ROS-independent once

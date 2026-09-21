@@ -273,18 +273,21 @@ box-constrained control variable.
 The ROS interpreter used by `colcon` must also be able to import the
 ROS-independent `formation_control` package.
 
-For example, in the Python environment used for the ROS 2 workspace:
+From the repository root, install the core package into the Python environment
+used by the ROS 2 workspace:
 
 ```bash
-pip install -e /path/to/brov2_formation_control
+pip install -e .
 ```
 
-Then:
+With the repository located under `<workspace>/src/`, the workspace can then be
+built using only relative paths:
 
 ```bash
-cd ~/ros2_ws
+cd ../..
 colcon build --symlink-install --packages-select formation_control_ros
 source install/setup.bash
+cd src/brov2_formation_control
 ```
 
 If you use `uv`, make sure the ROS 2 Python packages (`rclpy`, `px4_msgs`, ...)

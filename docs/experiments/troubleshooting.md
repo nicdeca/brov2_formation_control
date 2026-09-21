@@ -12,7 +12,7 @@ Inspect the separate initialization dataset rather than guessing from the
 mission plots:
 
 ```bash
-RUN=/absolute/or/relative/path/to/the/actual/run
+RUN=outputs/experiments/<run>
 python scripts/export_initialization_bag.py "$RUN"
 python scripts/plot_initialization_experiment.py \
   "$RUN/initialization/initialization_history.npz" --save

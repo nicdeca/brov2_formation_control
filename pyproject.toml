@@ -1,10 +1,10 @@
 [project]
 name = "formation-control"
 version = "0.1.0"
-description = "Add your description here"
+description = "Code for vision-based underwater formation control with input saturations via barrier Lyapunov functions."
 readme = "README.md"
 authors = [
-    { name = "Nicola_UB24", email = "nico.decarli@live.it" }
+    { name = "Nicola De Carli", email = "nico.decarli@live.it" }
 ]
 requires-python = ">=3.12"
 dependencies = [

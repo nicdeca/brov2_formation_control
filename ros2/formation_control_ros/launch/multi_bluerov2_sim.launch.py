@@ -15,18 +15,13 @@ MAX_ROBOTS = 6
 
 
 def _default_px4_dir() -> str:
-    candidates = [
-        os.environ.get("PX4_AUTOPILOT_DIR"),
-        "~/PX4-Autopilot",
-        "~/Gits/KTH-PX4/PX4-Autopilot",
-    ]
-    for candidate in candidates:
-        if not candidate:
-            continue
-        path = Path(candidate).expanduser()
-        if path.is_dir():
-            return str(path.resolve())
-    return str(Path("~/Github/PX4-Autopilot").expanduser())
+    configured = os.environ.get("PX4_AUTOPILOT_DIR")
+    if configured:
+        return str(Path(configured).expanduser())
+
+    # Portable fallback only; users can override with px4_dir:=... or by
+    # setting PX4_AUTOPILOT_DIR.
+    return str(Path.home() / "PX4-Autopilot")
 
 
 DEFAULT_PX4_DIR = _default_px4_dir()
@@ -61,7 +56,7 @@ def _launch_setup(context, *args, **kwargs):
     if not px4_dir.is_dir():
         raise RuntimeError(
             f"PX4-Autopilot directory not found: {px4_dir}\n"
-            "Pass px4_dir:=/absolute/path/to/PX4-Autopilot."
+            "Set PX4_AUTOPILOT_DIR or pass px4_dir:=<path-to-PX4-Autopilot>."
         )
     if not px4_binary.is_file():
         raise RuntimeError(

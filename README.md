@@ -2,6 +2,10 @@
 
 Distributed formation control for multiple BlueROV2 Heavy underwater vehicles under sensing and actuation constraints.
 
+> **Associated paper.** This repository contains the code associated with the paper
+> **“Vision-based Underwater Formation Control With Input Saturations via Barrier Lyapunov Functions.”**
+> A link to the preprint will be added here when it becomes publicly available.
+
 The project combines:
 
 - directed follower-to-parent sensing;
@@ -207,7 +211,7 @@ simulation:
 ```bash
 ros2 launch formation_control_ros multi_bluerov2_sim.launch.py \
   robot_count:=2 \
-  px4_dir:=/path/to/PX4-Autopilot
+  px4_dir:="$PX4_AUTOPILOT_DIR"
 ```
 
 In another terminal, start the Micro XRCE-DDS agent:

@@ -4,6 +4,9 @@ State-source arguments are forwarded to ``three_robot_experiment.launch.py``.
 PX4 remains the default for SITL.
 """
 
+import os
+from pathlib import Path
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -65,7 +68,9 @@ def generate_launch_description() -> LaunchDescription:
         [
             DeclareLaunchArgument(
                 "px4_dir",
-                default_value="/home/nicola/Gits/KTH-PX4/PX4-Autopilot",
+                default_value=os.environ.get(
+                    "PX4_AUTOPILOT_DIR", str(Path.home() / "PX4-Autopilot")
+                ),
             ),
             DeclareLaunchArgument(
                 "world",

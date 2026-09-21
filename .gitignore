@@ -12,6 +12,8 @@ __pycache__/
 # Virtual environments / uv
 # -----------------------------------------------------------------------------
 .venv/
+.venv-ros/
+.venv_ros/
 venv/
 env/
 
@@ -79,6 +81,10 @@ Thumbs.db
 # -----------------------------------------------------------------------------
 # Generated simulation results
 # -----------------------------------------------------------------------------
+*.tlog
+*.bag
+*.db3
+*.mcap
 results/
 outputs/
 figures/generated/

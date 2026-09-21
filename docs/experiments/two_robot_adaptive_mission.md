@@ -46,7 +46,7 @@ Simulator:
 ```bash
 ros2 launch formation_control_ros multi_bluerov2_sim.launch.py \
   robot_count:=2 \
-  px4_dir:=/home/nicola/Gits/KTH-PX4/PX4-Autopilot
+  px4_dir:=$PX4_AUTOPILOT_DIR
 ```
 
 Controller:
