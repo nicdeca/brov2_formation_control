@@ -24,6 +24,7 @@ class DistanceBarrierTuning:
     desired_distance: float = 1.8
     collision_weight: float = 1.0
     range_weight: float = 1.0
+    squared_distance_constraints: bool = False
 
     def __post_init__(self) -> None:
         if self.minimum_distance < 0.0:
@@ -131,8 +132,25 @@ def distance_barrier_sweep(
         n_samples,
     )
 
-    h_collision = distance**2 - tuning.minimum_distance**2
-    h_collision_reference = tuning.desired_distance**2 - tuning.minimum_distance**2
+    if tuning.squared_distance_constraints:
+        h_collision = distance**2 - tuning.minimum_distance**2
+        h_collision_reference = tuning.desired_distance**2 - tuning.minimum_distance**2
+        dh_collision_dd = 2.0 * distance
+
+        h_range = tuning.maximum_distance**2 - distance**2
+        h_range_reference = tuning.maximum_distance**2 - tuning.desired_distance**2
+        dh_range_dd = -2.0 * distance
+    else:
+        # Paper/default formulation:
+        # h_delta = d - d_min^c, h_Delta = d_max^c - d.
+        h_collision = distance - tuning.minimum_distance
+        h_collision_reference = tuning.desired_distance - tuning.minimum_distance
+        dh_collision_dd = np.ones_like(distance)
+
+        h_range = tuning.maximum_distance - distance
+        h_range_reference = tuning.maximum_distance - tuning.desired_distance
+        dh_range_dd = -np.ones_like(distance)
+
     collision = _barrier_values(
         h_collision,
         h_collision_reference,
@@ -144,12 +162,9 @@ def distance_barrier_sweep(
             h_collision_reference,
             weight=tuning.collision_weight,
         )
-        * 2.0
-        * distance
+        * dh_collision_dd
     )
 
-    h_range = tuning.maximum_distance**2 - distance**2
-    h_range_reference = tuning.maximum_distance**2 - tuning.desired_distance**2
     sensing_range = _barrier_values(
         h_range,
         h_range_reference,
@@ -161,8 +176,7 @@ def distance_barrier_sweep(
             h_range_reference,
             weight=tuning.range_weight,
         )
-        * (-2.0)
-        * distance
+        * dh_range_dd
     )
 
     return DistanceBarrierSweep(

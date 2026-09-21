@@ -6,6 +6,7 @@ import argparse
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import numpy as np
 
 from formation_control.visualization import (
     DistanceBarrierTuning,
@@ -16,6 +17,78 @@ from formation_control.visualization import (
 )
 
 
+def plot_weight_sweep(
+    *,
+    channel: str,
+    weights: list[float],
+    d_min: float,
+    d_max: float,
+    d_des: float,
+    alpha_h: float,
+    alpha_v: float,
+    alpha_h_des: float,
+    alpha_v_des: float,
+) -> plt.Figure:
+    """Visualize how the barrier weight changes potential and physical gradient."""
+    if not weights or any((not np.isfinite(w) or w <= 0.0) for w in weights):
+        raise ValueError("weight-sweep values must be finite and positive.")
+
+    if channel in {"collision", "range"}:
+        x = np.linspace(d_min + 1e-3, d_max - 1e-3, 900)
+        if channel == "collision":
+            h = x - d_min
+            h_d = d_des - d_min
+            dh_dx = np.ones_like(x)
+            xlabel = r"distance $d$ [m]"
+            boundary = d_min
+        else:
+            h = d_max - x
+            h_d = d_max - d_des
+            dh_dx = -np.ones_like(x)
+            xlabel = r"distance $d$ [m]"
+            boundary = d_max
+    else:
+        limit = alpha_h if channel == "horizontal_fov" else alpha_v
+        desired = alpha_h_des if channel == "horizontal_fov" else alpha_v_des
+        x = np.linspace(-0.995 * limit, 0.995 * limit, 900)
+        h = limit**2 - x**2
+        h_d = limit**2 - desired**2
+        dh_dx = -2.0 * x
+        xlabel = (
+            r"normalized horizontal coordinate $\alpha_h$"
+            if channel == "horizontal_fov"
+            else r"normalized vertical coordinate $\alpha_v$"
+        )
+        boundary = None
+
+    beta = -np.log(h / h_d) + h / h_d - 1.0
+    beta_prime = 1.0 / h_d - 1.0 / h
+
+    fig, axes = plt.subplots(1, 2, figsize=(9.0, 3.7))
+    for weight in weights:
+        axes[0].plot(x, weight * beta, label=rf"$\mu={weight:g}$")
+        axes[1].plot(
+            x,
+            np.abs(weight * beta_prime * dh_dx),
+            label=rf"$\mu={weight:g}$",
+        )
+
+    axes[0].set_xlabel(xlabel)
+    axes[0].set_ylabel(r"$\mu\,\overline{\beta}$")
+    axes[0].set_title(f"{channel.replace('_', ' ').title()} barrier")
+    axes[1].set_xlabel(xlabel)
+    axes[1].set_ylabel("absolute physical gradient")
+    axes[1].set_title("Barrier action versus state")
+    for ax in axes:
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+    if boundary is not None:
+        for ax in axes:
+            ax.axvline(boundary, linestyle="--", linewidth=1.0)
+    fig.tight_layout()
+    return fig
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
 
@@ -24,6 +97,11 @@ def main() -> None:
     parser.add_argument("--d-des", type=float, default=1.8)
     parser.add_argument("--collision-weight", type=float, default=1.0)
     parser.add_argument("--range-weight", type=float, default=1.0)
+    parser.add_argument(
+        "--squared-distance",
+        action="store_true",
+        help="use the legacy squared-distance barrier coordinates",
+    )
 
     parser.add_argument("--alpha-h", type=float, default=0.72)
     parser.add_argument("--alpha-v", type=float, default=0.72)
@@ -32,6 +110,23 @@ def main() -> None:
     parser.add_argument("--fov-h-weight", type=float, default=1.0)
     parser.add_argument("--fov-v-weight", type=float, default=1.0)
 
+    parser.add_argument(
+        "--weight-sweep",
+        nargs="+",
+        type=float,
+        default=None,
+        metavar="MU",
+        help=(
+            "plot a sweep of absolute barrier weights mu to visualize how "
+            "early/strongly the selected barrier acts"
+        ),
+    )
+    parser.add_argument(
+        "--weight-sweep-channel",
+        choices=("collision", "range", "horizontal_fov", "vertical_fov"),
+        default="vertical_fov",
+        help="constraint channel used by --weight-sweep",
+    )
     parser.add_argument(
         "--tuning",
         action="store_true",
@@ -70,6 +165,7 @@ def main() -> None:
         desired_distance=args.d_des,
         collision_weight=args.collision_weight,
         range_weight=args.range_weight,
+        squared_distance_constraints=args.squared_distance,
     )
     fov = FoVBarrierTuning(
         horizontal_limit=args.alpha_h,
@@ -94,6 +190,20 @@ def main() -> None:
             paper_quality=args.paper_quality,
         )
 
+    sweep_figure = None
+    if args.weight_sweep is not None:
+        sweep_figure = plot_weight_sweep(
+            channel=args.weight_sweep_channel,
+            weights=args.weight_sweep,
+            d_min=args.d_min,
+            d_max=args.d_max,
+            d_des=args.d_des,
+            alpha_h=args.alpha_h,
+            alpha_v=args.alpha_v,
+            alpha_h_des=args.alpha_h_des,
+            alpha_v_des=args.alpha_v_des,
+        )
+
     if args.save:
         figure_format = (
             args.figure_format
@@ -114,6 +224,13 @@ def main() -> None:
             save_figure(
                 tuning_figure,
                 args.output_dir / f"recentered_barrier_tuning.{figure_format}",
+                paper_quality=args.paper_quality,
+            )
+        if sweep_figure is not None:
+            save_figure(
+                sweep_figure,
+                args.output_dir
+                / f"barrier_weight_sweep_{args.weight_sweep_channel}.{figure_format}",
                 paper_quality=args.paper_quality,
             )
 

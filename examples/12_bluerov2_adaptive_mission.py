@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Two-BlueROV adaptive-domain mission with moving leader and formation switches.
+"""Two-BlueROV adaptive-domain mission matching the Gazebo mission geometry.
 
 This paper-oriented pure-Python example is intentionally more mission-like than
-the short stress test in example 04.  A leader executes a moderate translational
-mission while one follower is commanded through several large relative-position
-reconfigurations.  The desired formations remain inside the deliberately tight
-conservative sensing domain; relaxation is therefore driven by transient
-second-order dynamics and bounded actuation, not by an inadmissible steady
-reference.
+the short stress test in example 04.  It uses the same initial positions and
+piecewise-constant follower-to-leader formation references as
+``two_robot_adaptive_mission.launch.py``.  A leader executes a moderate
+translational mission while one follower is commanded through several large
+relative-position reconfigurations.  The desired formations remain inside the
+deliberately tight conservative sensing domain; relaxation is therefore driven
+by transient second-order dynamics and bounded actuation, not by an inadmissible
+steady reference.
 
 The default conservative sensing limits are tightened to
 
@@ -84,6 +86,15 @@ from formation_control.visualization.formation_3d import (
 )
 
 
+# Keep these values identical to
+# ros2/formation_control_ros/launch/two_robot_adaptive_mission.launch.py.
+GAZEBO_INITIAL_LEADER_POSITION = np.array([2.675, 0.050, -0.775], dtype=float)
+GAZEBO_INITIAL_RELATIVE = np.array([-1.800, -0.700, 0.000], dtype=float)
+GAZEBO_INITIAL_FOLLOWER_POSITION = np.array([4.475, 0.750, -0.775], dtype=float)
+BASE_RANGE_STRESS_RELATIVE = np.array([-2.30, -0.55, -0.30], dtype=float)
+
+
+
 @dataclass(frozen=True)
 class MissionFormation:
     name: str
@@ -104,6 +115,18 @@ class MissionResult:
     image_history: np.ndarray
     slacks: np.ndarray
     required_slacks: np.ndarray
+    relaxation_gamma: np.ndarray
+    relaxation_continuous_rate: np.ndarray
+    relaxation_recovery_rate: np.ndarray
+    relaxation_expansion_rate: np.ndarray
+    relaxation_continuous_state_change: np.ndarray
+    predictive_guard_correction: np.ndarray
+    emergency_guard_correction: np.ndarray
+    generalized_velocities: np.ndarray
+    desired_generalized_velocity: np.ndarray
+    unlimited_desired_generalized_velocity: np.ndarray
+    filtered_generalized_velocity: np.ndarray
+    filtered_generalized_acceleration: np.ndarray
     allocation: BlueROV2HeavyThrusterAllocation
 
 
@@ -142,42 +165,112 @@ def build_domains(
     )
 
 
-def mission_formations() -> tuple[MissionFormation, ...]:
-    # Parent-minus-follower references.  Every endpoint is strictly inside
-    # d_max^c = 2.4 m.  B -> C is the main lateral reconfiguration; C -> D
-    # combines a large lateral return with a near-range-boundary formation.
+def build_relaxation_policy(
+    distance_domain: DistanceDomain,
+    fov_domain: FieldOfViewDomain,
+    desired_relative_position: np.ndarray,
+    *,
+    recovery_gain: float,
+    barrier_gain: float,
+    activation_on_ratio: float,
+    activation_off_ratio: float,
+    infeasibility_epsilon: float,
+    sampled_guard_margin_ratio: float,
+) -> FunnelRelaxationPolicy:
+    desired_relative = np.asarray(desired_relative_position, dtype=float)
+    desired_image = NormalizedImagePoint(0.0, 0.0)
+    desired_values = np.array(
+        [
+            MinimumDistanceConstraint(
+                distance_domain.d_min_conservative,
+                squared=distance_domain.squared,
+            ).evaluate(desired_relative).value,
+            MaximumDistanceConstraint(
+                distance_domain.d_max_conservative,
+                squared=distance_domain.squared,
+            ).evaluate(desired_relative).value,
+            HorizontalFieldOfViewConstraint(
+                fov_domain.alpha_h_conservative
+            ).evaluate(desired_image).value,
+            VerticalFieldOfViewConstraint(
+                fov_domain.alpha_v_conservative
+            ).evaluate(desired_image).value,
+        ],
+        dtype=float,
+    )
+    return FunnelRelaxationPolicy(
+        maximum_enlargement=np.array(
+            [
+                distance_domain.collision_enlargement_max,
+                distance_domain.range_enlargement_max,
+                fov_domain.horizontal_enlargement_max,
+                fov_domain.vertical_enlargement_max,
+            ],
+            dtype=float,
+        ),
+        desired_conservative_values=desired_values,
+        barrier_weights=np.array([0.18, 0.18, 0.25, 0.25], dtype=float),
+        recovery_gain=recovery_gain,
+        barrier_gain=barrier_gain,
+        activation_on_ratio=activation_on_ratio,
+        activation_off_ratio=activation_off_ratio,
+        infeasibility_epsilon=infeasibility_epsilon,
+        minimum_constraint_margin=1e-8,
+        sampled_guard_margin_ratio=sampled_guard_margin_ratio,
+    )
+
+
+def _range_stress_relative(distance: float | None) -> np.ndarray:
+    if distance is None:
+        return BASE_RANGE_STRESS_RELATIVE.copy()
+    if distance <= 0.0:
+        raise ValueError("range-stress distance must be positive")
+    direction = BASE_RANGE_STRESS_RELATIVE / np.linalg.norm(BASE_RANGE_STRESS_RELATIVE)
+    return float(distance) * direction
+
+
+def mission_formations(
+    *, range_stress_distance: float | None = None
+) -> tuple[MissionFormation, ...]:
+    # Parent-minus-follower references.  The default values are exactly the
+    # formations configured in two_robot_adaptive_mission.launch.py.  The
+    # optional range-stress distance keeps the direction of formation D while
+    # moving its equilibrium farther inside the conservative range boundary.
+    range_stress_relative = _range_stress_relative(range_stress_distance)
     return (
         MissionFormation(
-            "A_nominal",
+            "adaptive_A",
             0.0,
-            np.array([0.70, -1.80, 0.00], dtype=float),
+            np.array([-1.80, -0.70, 0.00], dtype=float),
         ),
         MissionFormation(
-            "B_starboard_high",
+            "adaptive_B",
             18.0,
-            np.array([1.45, -1.65, -0.40], dtype=float),
+            np.array([-1.65, -1.45, -0.40], dtype=float),
         ),
         MissionFormation(
-            "C_port_low",
+            "adaptive_C",
             38.0,
-            np.array([-1.45, -1.65, 0.40], dtype=float),
+            np.array([-1.65, 1.45, 0.40], dtype=float),
         ),
         MissionFormation(
-            "D_long",
+            "adaptive_D",
             60.0,
-            np.array([0.55, -2.30, -0.30], dtype=float),
+            range_stress_relative,
         ),
         MissionFormation(
-            "A_recover",
+            "adaptive_A_recover",
             80.0,
-            np.array([0.70, -1.80, 0.00], dtype=float),
+            np.array([-1.80, -0.70, 0.00], dtype=float),
         ),
     )
 
 
-def desired_relative_at(time: float) -> np.ndarray:
-    current = mission_formations()[0].desired_relative
-    for formation in mission_formations():
+def desired_relative_at(
+    time: float, formations: tuple[MissionFormation, ...]
+) -> np.ndarray:
+    current = formations[0].desired_relative
+    for formation in formations:
         if time + 1e-12 >= formation.start:
             current = formation.desired_relative
         else:
@@ -185,9 +278,24 @@ def desired_relative_at(time: float) -> np.ndarray:
     return current.copy()
 
 
-def leader_velocity_reference(time: float) -> np.ndarray:
-    # Moderate mission motion.  The aggressive event is the formation switch,
-    # not an artificial high-speed leader pulse.
+def leader_velocity_reference(
+    time: float,
+    *,
+    range_stress_relative: np.ndarray,
+    range_stress_speed: float | None = None,
+) -> np.ndarray:
+    # Optional bounded-authority stress maneuver.  During formation D, move the
+    # leader outward along the desired parent-minus-follower direction.  This
+    # can transiently stretch the range while the desired equilibrium itself
+    # remains comfortably inside the conservative range boundary.
+    if range_stress_speed is not None and 60.0 <= time < 65.0:
+        if range_stress_speed < 0.0:
+            raise ValueError("range-stress leader speed must be non-negative")
+        direction = np.asarray(range_stress_relative, dtype=float)
+        direction = direction / np.linalg.norm(direction)
+        return float(range_stress_speed) * direction
+
+    # Moderate nominal mission motion.
     if 12.0 <= time < 32.0:
         return np.array([0.10, 0.08, 0.00])
     if 32.0 <= time < 52.0:
@@ -199,10 +307,24 @@ def leader_velocity_reference(time: float) -> np.ndarray:
     return np.zeros(3)
 
 
-def integrate_leader_reference(times: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    velocity = np.stack([leader_velocity_reference(float(t)) for t in times])
+def integrate_leader_reference(
+    times: np.ndarray,
+    *,
+    range_stress_relative: np.ndarray,
+    range_stress_speed: float | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    velocity = np.stack(
+        [
+            leader_velocity_reference(
+                float(t),
+                range_stress_relative=range_stress_relative,
+                range_stress_speed=range_stress_speed,
+            )
+            for t in times
+        ]
+    )
     position = np.zeros((times.size, 3), dtype=float)
-    position[0] = np.array([0.0, 0.0, -1.0], dtype=float)
+    position[0] = GAZEBO_INITIAL_LEADER_POSITION
     for k in range(times.size - 1):
         dt = float(times[k + 1] - times[k])
         position[k + 1] = position[k] + dt * velocity[k]
@@ -320,16 +442,28 @@ def simulate(
     alpha_h_conservative: float,
     alpha_v_conservative: float,
     thrust_derating: float,
+    virtual_linear_gain: float,
+    virtual_angular_gain: float,
+    command_filter_linear_bandwidth: float,
+    command_filter_angular_bandwidth: float,
+    alpha_gain: float,
     relaxation_recovery_gain: float,
     relaxation_barrier_gain: float,
-    relaxation_domain_margin_ratio: float,
     relaxation_activation_on_ratio: float,
     relaxation_activation_off_ratio: float,
+    relaxation_infeasibility_epsilon: float,
+    range_stress_distance: float | None = None,
+    range_stress_leader_speed: float | None = None,
+    sampled_guard_margin_ratio: float = 0.02,
 ) -> MissionResult:
     graph = DirectedSensingGraph.rooted_star(2)
-    initial_relative = desired_relative_at(0.0)
-    initial_leader = np.array([0.0, 0.0, -1.0])
-    initial_follower = initial_leader - initial_relative
+    formations = mission_formations(range_stress_distance=range_stress_distance)
+    range_stress_relative = formations[3].desired_relative
+    initial_relative = GAZEBO_INITIAL_RELATIVE.copy()
+    initial_leader = GAZEBO_INITIAL_LEADER_POSITION.copy()
+    initial_follower = GAZEBO_INITIAL_FOLLOWER_POSITION.copy()
+    if not np.allclose(initial_leader - initial_follower, initial_relative):
+        raise RuntimeError("Gazebo initial positions and relative reference are inconsistent.")
 
     scenario = FormationScenario(
         graph=graph,
@@ -359,28 +493,44 @@ def simulate(
         model,
         allocation,
         control_space=control_space,
+        virtual_gain=np.diag(
+            [
+                virtual_linear_gain,
+                virtual_linear_gain,
+                virtual_linear_gain,
+                virtual_angular_gain,
+                virtual_angular_gain,
+                virtual_angular_gain,
+            ]
+        ),
+        virtual_velocity_norm_limits=np.array([1.5, 2.0]),
+        filter_bandwidth=np.array(
+            [
+                command_filter_linear_bandwidth,
+                command_filter_linear_bandwidth,
+                command_filter_linear_bandwidth,
+                command_filter_angular_bandwidth,
+                command_filter_angular_bandwidth,
+                command_filter_angular_bandwidth,
+            ],
+            dtype=float,
+        ),
+        alpha_gain=alpha_gain,
         slack_linear_penalty=100.0,
         slack_penalty=5e3,
-        virtual_velocity_norm_limits=np.array([1.5, 2.0]),
     )
     controller = design.agent_controller
 
-    maximum = np.array(
-        [
-            distance_domain.collision_enlargement_max,
-            distance_domain.range_enlargement_max,
-            fov_domain.horizontal_enlargement_max,
-            fov_domain.vertical_enlargement_max,
-        ]
-    )
-    relaxation = FunnelRelaxationPolicy(
-        maximum_enlargement=maximum,
+    relaxation = build_relaxation_policy(
+        distance_domain,
+        fov_domain,
+        initial_relative,
         recovery_gain=relaxation_recovery_gain,
         barrier_gain=relaxation_barrier_gain,
-        domain_margin_ratio=relaxation_domain_margin_ratio,
         activation_on_ratio=relaxation_activation_on_ratio,
         activation_off_ratio=relaxation_activation_off_ratio,
-        minimum_constraint_margin=1e-5,
+        infeasibility_epsilon=relaxation_infeasibility_epsilon,
+        sampled_guard_margin_ratio=sampled_guard_margin_ratio,
     )
     enabled = np.ones(4, dtype=bool)
 
@@ -391,6 +541,11 @@ def simulate(
     states[1, 3:7] = look_at_quaternion(initial_relative)
 
     relaxation_state = np.zeros((2, 4), dtype=float)
+    previous_conservative_values = np.full(4, np.nan, dtype=float)
+    predictive_guard_count = 0
+    predictive_guard_maximum_correction = 0.0
+    emergency_guard_count = 0
+    emergency_guard_maximum_correction = 0.0
     edge = tuple(graph.edges)[0]
 
     kinematics = evaluate_sensing_constraint_kinematics(
@@ -402,12 +557,10 @@ def simulate(
         states[0],
     )
     if adaptive:
-        projected, _ = relaxation.project_to_current_domain(
-            relaxation_state[1],
+        relaxation_state[1] = relaxation.initialize_for_constraint_values(
             kinematics.values,
             enabled=enabled,
         )
-        relaxation_state[1] = projected
 
     potential = build_edge_potential(
         desired_relative=initial_relative,
@@ -425,7 +578,11 @@ def simulate(
 
     steps = int(np.ceil(duration / dt))
     times = np.arange(steps + 1, dtype=float) * dt
-    leader_ref_position, leader_ref_velocity = integrate_leader_reference(times)
+    leader_ref_position, leader_ref_velocity = integrate_leader_reference(
+        times,
+        range_stress_relative=range_stress_relative,
+        range_stress_speed=range_stress_leader_speed,
+    )
 
     positions = np.empty((steps + 1, 2, 3))
     quaternions = np.empty((steps + 1, 2, 4))
@@ -437,6 +594,18 @@ def simulate(
     desired_positions = np.empty((steps + 1, 2, 3))
     slacks = np.zeros((steps, 2))
     required_slacks = np.full((steps, 2), np.nan)
+    relaxation_gamma = np.zeros(steps, dtype=float)
+    relaxation_continuous_rate = np.zeros((steps, 4), dtype=float)
+    relaxation_recovery_rate = np.zeros((steps, 4), dtype=float)
+    relaxation_expansion_rate = np.zeros((steps, 4), dtype=float)
+    relaxation_continuous_state_change = np.zeros((steps, 4), dtype=float)
+    predictive_guard_correction = np.zeros((steps, 4), dtype=float)
+    emergency_guard_correction = np.zeros((steps, 4), dtype=float)
+    generalized_velocities = np.empty((steps + 1, 2, 6), dtype=float)
+    desired_generalized_velocity = np.empty((steps, 6), dtype=float)
+    unlimited_desired_generalized_velocity = np.empty((steps, 6), dtype=float)
+    filtered_generalized_velocity = np.empty((steps, 6), dtype=float)
+    filtered_generalized_acceleration = np.empty((steps, 6), dtype=float)
 
     plant_integrator = RK4Integrator()
     filter_integrator = RK4Integrator()
@@ -446,8 +615,10 @@ def simulate(
         quaternions[sample] = states[:, 3:7]
         velocities[sample, 0] = inertial_velocity(model, states[0])
         velocities[sample, 1] = inertial_velocity(model, states[1])
+        generalized_velocities[sample, 0] = model.split_state(states[0])[2]
+        generalized_velocities[sample, 1] = model.split_state(states[1])[2]
         rho_history[sample, 1] = relaxation.enlargement(relaxation_state[1])
-        desired_relative_history[sample] = desired_relative_at(times[sample])
+        desired_relative_history[sample] = desired_relative_at(times[sample], formations)
         desired_positions[sample, 0] = leader_ref_position[sample]
         desired_positions[sample, 1] = (
             leader_ref_position[sample] - desired_relative_history[sample]
@@ -490,7 +661,7 @@ def simulate(
         )
 
         # Follower.
-        desired_relative = desired_relative_at(time)
+        desired_relative = desired_relative_at(time, formations)
         kinematics = evaluate_sensing_constraint_kinematics(
             model,
             camera,
@@ -499,15 +670,39 @@ def simulate(
             states[1],
             states[0],
         )
+        if np.all(np.isfinite(previous_conservative_values)):
+            conservative_rates = (kinematics.values - previous_conservative_values) / dt
+        else:
+            conservative_rates = np.zeros(4, dtype=float)
+        previous_conservative_values = kinematics.values.copy()
+
+        relaxation = relaxation.with_desired_conservative_values(
+            build_relaxation_policy(
+                distance_domain,
+                fov_domain,
+                desired_relative,
+                recovery_gain=relaxation_recovery_gain,
+                barrier_gain=relaxation_barrier_gain,
+                activation_on_ratio=relaxation_activation_on_ratio,
+                activation_off_ratio=relaxation_activation_off_ratio,
+                infeasibility_epsilon=relaxation_infeasibility_epsilon,
+                sampled_guard_margin_ratio=sampled_guard_margin_ratio,
+            ).desired_conservative_values
+        )
 
         if adaptive:
-            projected, _ = relaxation.project_to_current_domain(
+            relaxation_state[1], emergency_correction = relaxation.project_to_current_domain(
                 relaxation_state[1],
                 kinematics.values,
                 enabled=enabled,
             )
-            relaxation_state[1] = projected
-
+            emergency_guard_correction[step] = emergency_correction
+            if np.any(emergency_correction > 0.0):
+                emergency_guard_count += 1
+                emergency_guard_maximum_correction = max(
+                    emergency_guard_maximum_correction,
+                    float(np.max(emergency_correction)),
+                )
         rho = relaxation.enlargement(relaxation_state[1])
         potential = build_edge_potential(
             desired_relative=desired_relative,
@@ -527,20 +722,68 @@ def simulate(
         )
 
         controls[step, 1] = design.representative_thruster_forces(evaluation)
+        desired_generalized_velocity[step] = evaluation.controller.desired_velocity
+        unlimited_desired_generalized_velocity[step] = (
+            evaluation.controller.unlimited_desired_velocity
+        )
+        filtered_generalized_velocity[step] = evaluation.controller.filter.output
+        filtered_generalized_acceleration[step] = (
+            evaluation.controller.filter.output_derivative
+        )
         slacks[step, 1] = evaluation.slack
         if evaluation.required_slack is not None:
             required_slacks[step, 1] = evaluation.required_slack
 
         if adaptive:
-            relaxation_eval = relaxation.evaluate(
+            required = (
+                0.0
+                if evaluation.required_slack is None
+                else max(float(evaluation.required_slack), 0.0)
+            )
+
+            # Diagnose the paper continuous-time adaptive law separately from
+            # the implementation-only sampled-data safeguards.  This makes it
+            # explicit whether relaxation is driven by CLF actuation
+            # infeasibility (gamma > 0) or by a sampled guard.
+            relaxation_evaluation = relaxation.evaluate(
                 relaxation_state[1],
                 conservative_values=kinematics.values,
+                required_slack=required,
                 enabled=enabled,
             )
-            relaxation_state[1] = np.maximum(
-                relaxation_state[1] + dt * relaxation_eval.selected_rate,
-                0.0,
+            relaxation_gamma[step] = relaxation_evaluation.infeasibility_activation
+            relaxation_continuous_rate[step] = relaxation_evaluation.selected_rate
+            relaxation_recovery_rate[step] = relaxation_evaluation.recovery_rate
+            relaxation_expansion_rate[step] = relaxation_evaluation.enlargement_rate
+
+            state_before_continuous_step = relaxation_state[1].copy()
+            relaxation_state[1], _ = relaxation.advance(
+                relaxation_state[1],
+                conservative_values=kinematics.values,
+                required_slack=required,
+                enabled=enabled,
+                sample_time=dt,
             )
+            relaxation_continuous_state_change[step] = (
+                relaxation_state[1] - state_before_continuous_step
+            )
+
+            relaxation_state[1], predictive_correction = (
+                relaxation.project_to_predicted_domain(
+                    relaxation_state[1],
+                    kinematics.values,
+                    conservative_rates,
+                    sample_time=dt,
+                    enabled=enabled,
+                )
+            )
+            predictive_guard_correction[step] = predictive_correction
+            if np.any(predictive_correction > 0.0):
+                predictive_guard_count += 1
+                predictive_guard_maximum_correction = max(
+                    predictive_guard_maximum_correction,
+                    float(np.max(predictive_correction)),
+                )
 
         filter_state = filter_integrator.step(
             controller.dynamics_controller.command_filter,
@@ -566,6 +809,20 @@ def simulate(
         quaternions=quaternions,
     )
 
+    if adaptive:
+        print(
+            "Predictive sampled guard: "
+            f"{predictive_guard_count} adjusted follower-samples, "
+            "maximum normalized adjustment "
+            f"{predictive_guard_maximum_correction:.3e}"
+        )
+        print(
+            "Emergency sampled projection: "
+            f"{emergency_guard_count} adjusted follower-samples, "
+            "maximum normalized adjustment "
+            f"{emergency_guard_maximum_correction:.3e}"
+        )
+
     return MissionResult(
         scenario=scenario,
         trajectory=trajectory,
@@ -578,6 +835,18 @@ def simulate(
         image_history=image_history,
         slacks=slacks,
         required_slacks=required_slacks,
+        relaxation_gamma=relaxation_gamma,
+        relaxation_continuous_rate=relaxation_continuous_rate,
+        relaxation_recovery_rate=relaxation_recovery_rate,
+        relaxation_expansion_rate=relaxation_expansion_rate,
+        relaxation_continuous_state_change=relaxation_continuous_state_change,
+        predictive_guard_correction=predictive_guard_correction,
+        emergency_guard_correction=emergency_guard_correction,
+        generalized_velocities=generalized_velocities,
+        desired_generalized_velocity=desired_generalized_velocity,
+        unlimited_desired_generalized_velocity=unlimited_desired_generalized_velocity,
+        filtered_generalized_velocity=filtered_generalized_velocity,
+        filtered_generalized_acceleration=filtered_generalized_acceleration,
         allocation=allocation,
     )
 
@@ -724,6 +993,173 @@ def plot_normalized_relaxation(result: MissionResult) -> plt.Figure:
     return fig
 
 
+def plot_generalized_velocity_diagnostics(
+    result: MissionResult,
+    *,
+    angular: bool,
+) -> plt.Figure:
+    """Compare actual, desired, raw-desired, and filtered follower velocities."""
+    if angular:
+        indices = range(3, 6)
+        symbols = ("p", "q", "r")
+        ylabel = "angular velocity [rad/s]"
+    else:
+        indices = range(3)
+        symbols = ("u", "v", "w")
+        ylabel = "linear velocity [m/s]"
+
+    sample_times = result.trajectory.times
+    control_times = sample_times[:-1]
+    actual = result.generalized_velocities[:, 1]
+    desired = result.desired_generalized_velocity
+    unlimited = result.unlimited_desired_generalized_velocity
+    filtered = result.filtered_generalized_velocity
+
+    fig, axes = plt.subplots(3, 1, sharex=True)
+    for axis, index, symbol in zip(axes, indices, symbols, strict=True):
+        axis.plot(sample_times, actual[:, index], label=rf"${symbol}_i$")
+        axis.plot(
+            control_times,
+            desired[:, index],
+            "--",
+            label=rf"${symbol}_{{i,d}}$",
+        )
+        axis.plot(
+            control_times,
+            filtered[:, index],
+            "-.",
+            label=rf"${symbol}_{{i,f}}$",
+        )
+        if not np.allclose(
+            unlimited[:, index],
+            desired[:, index],
+            rtol=1e-8,
+            atol=1e-10,
+        ):
+            axis.plot(
+                control_times,
+                unlimited[:, index],
+                ":",
+                label=rf"${symbol}_{{i,d,raw}}$",
+            )
+        axis.grid(True, alpha=0.3)
+        axis.legend(ncol=4, loc="best")
+
+    axes[-1].set_xlabel(r"$t$ [s]")
+    axes[1].set_ylabel(ylabel)
+    fig.tight_layout()
+    return fig
+
+
+def plot_thruster_diagnostics(result: MissionResult) -> plt.Figure:
+    """Plot follower thruster forces and aggregate bound utilization."""
+    times = result.trajectory.times[:-1]
+    forces = result.trajectory.controls[:, 1]
+    utilization = np.stack(
+        [
+            np.asarray(result.allocation.utilization(sample), dtype=float)
+            for sample in forces
+        ]
+    )
+    maximum_utilization = np.max(utilization, axis=1)
+
+    fig, axes = plt.subplots(2, 1, sharex=True)
+    for k in range(forces.shape[1]):
+        axes[0].plot(times, forces[:, k], label=rf"$f_{{{k + 1}}}$")
+    axes[0].set_ylabel("thruster force [N]")
+    axes[0].grid(True, alpha=0.3)
+    axes[0].legend(ncol=4)
+
+    axes[1].plot(times, maximum_utilization, label="maximum utilization")
+    axes[1].axhline(1.0, linestyle=":", label="thruster limit")
+    axes[1].set_xlabel(r"$t$ [s]")
+    axes[1].set_ylabel("utilization")
+    axes[1].set_ylim(bottom=0.0)
+    axes[1].grid(True, alpha=0.3)
+    axes[1].legend()
+    fig.tight_layout()
+    return fig
+
+
+
+def plot_relaxation_mechanism_diagnostics(
+    result: MissionResult,
+    *,
+    channel: int = 1,
+) -> plt.Figure:
+    """Separate paper-law adaptation from sampled-data safeguard action.
+
+    The default ``channel=1`` is the maximum-range channel ``s_Delta``, which
+    is the active adaptive channel in this mission.  The figure exposes the
+    CLF-required relaxation and gate, the continuous adaptive-law rate, and the
+    two implementation-only sampled-data corrections.
+    """
+    if channel not in range(4):
+        raise ValueError("channel must be one of 0, 1, 2, 3.")
+
+    times = result.trajectory.times[:-1]
+    required = np.nan_to_num(
+        result.required_slacks[:, 1],
+        nan=0.0,
+        posinf=np.nan,
+        neginf=np.nan,
+    )
+    channel_symbols = (r"\delta", r"\Delta", "h", "v")
+    symbol = channel_symbols[channel]
+
+    fig, axes = plt.subplots(4, 1, sharex=True)
+
+    axes[0].plot(times, required, label=r"$\delta_{\mathrm{req}}$")
+    axes[0].set_ylabel(r"$\delta_{\mathrm{req}}$")
+    axes[0].grid(True, alpha=0.3)
+    axes[0].legend()
+
+    axes[1].plot(times, result.relaxation_gamma, label=r"$\gamma$")
+    axes[1].set_ylabel(r"$\gamma$")
+    axes[1].set_ylim(-0.02, 1.02)
+    axes[1].grid(True, alpha=0.3)
+    axes[1].legend()
+
+    axes[2].plot(
+        times,
+        result.relaxation_continuous_rate[:, channel],
+        label=rf"$\dot s_{{{symbol}}}$",
+    )
+    axes[2].plot(
+        times,
+        result.relaxation_expansion_rate[:, channel],
+        "--",
+        label=rf"$\dot s_{{{symbol}}}^{{\mathrm{{exp}}}}$",
+    )
+    axes[2].plot(
+        times,
+        result.relaxation_recovery_rate[:, channel],
+        ":",
+        label=rf"$\dot s_{{{symbol}}}^{{\mathrm{{rec}}}}$",
+    )
+    axes[2].set_ylabel(r"continuous rate [s$^{-1}$]")
+    axes[2].grid(True, alpha=0.3)
+    axes[2].legend(ncol=3)
+
+    axes[3].plot(
+        times,
+        result.predictive_guard_correction[:, channel],
+        label="predictive guard",
+    )
+    axes[3].plot(
+        times,
+        result.emergency_guard_correction[:, channel],
+        "--",
+        label="emergency projection",
+    )
+    axes[3].set_xlabel(r"$t$ [s]")
+    axes[3].set_ylabel(rf"$\Delta s_{{{symbol}}}$")
+    axes[3].grid(True, alpha=0.3)
+    axes[3].legend()
+
+    fig.tight_layout()
+    return fig
+
 def print_summary(result: MissionResult) -> None:
     maxima = np.array(
         [
@@ -737,12 +1173,21 @@ def print_summary(result: MissionResult) -> None:
     names = ("collision", "range", "horizontal FoV", "vertical FoV")
     print("\nAdaptive-domain mission summary")
     print("--------------------------------")
+    peak_overall = float(np.nanmax(normalized))
+    triggered = peak_overall > 1e-4
+    print(
+        "adaptive relaxation triggered: "
+        f"{'YES' if triggered else 'NO'} "
+        f"(max s={peak_overall:.3f})"
+    )
     for k, name in enumerate(names):
         index = int(np.nanargmax(normalized[:, k]))
         peak = float(normalized[index, k])
+        active = np.flatnonzero(normalized[:, k] > 1e-4)
+        first = "-" if active.size == 0 else f"{result.trajectory.times[int(active[0])]:.2f} s"
         print(
-            f"{name:16s}: peak normalized relaxation {peak:6.3f} "
-            f"at t={result.trajectory.times[index]:6.2f} s"
+            f"{name:16s}: peak s={peak:6.3f} at "
+            f"t={result.trajectory.times[index]:6.2f} s; first activation={first}"
         )
 
     relative = result.trajectory.positions[:, 0] - result.trajectory.positions[:, 1]
@@ -762,16 +1207,46 @@ def print_summary(result: MissionResult) -> None:
         ]
     )
     print(
+        "follower thruster bounds: "
+        f"[{float(result.allocation.lower_bounds[0]):.3f}, "
+        f"{float(result.allocation.upper_bounds[0]):.3f}] N"
+    )
+    print(
         "maximum follower thruster utilization: "
         f"{float(np.max(follower_utilization)):.3f}"
     )
-    finite = result.required_slacks[np.isfinite(result.required_slacks)]
+    follower_required = result.required_slacks[:, 1]
+    finite = follower_required[np.isfinite(follower_required)]
     if finite.size:
+        max_index = int(np.nanargmax(follower_required))
         print(
             "CLF actuation infeasibility: "
-            f"max required slack={np.max(finite):.3g}, "
+            f"max required slack={np.max(finite):.3g} "
+            f"at t={result.trajectory.times[max_index]:.2f} s, "
             f"samples={100*np.mean(finite > 1e-10):.2f}%"
         )
+
+    range_channel = 1
+    continuous_positive = np.maximum(
+        result.relaxation_continuous_state_change[:, range_channel],
+        0.0,
+    )
+    predictive_positive = np.maximum(
+        result.predictive_guard_correction[:, range_channel],
+        0.0,
+    )
+    emergency_positive = np.maximum(
+        result.emergency_guard_correction[:, range_channel],
+        0.0,
+    )
+    print(
+        "range-relaxation source: "
+        f"max gamma={float(np.max(result.relaxation_gamma)):.3f}, "
+        f"continuous-expansion samples={int(np.count_nonzero(continuous_positive > 1e-12))}, "
+        f"sum positive continuous Delta-s={float(np.sum(continuous_positive)):.3e}, "
+        f"sum predictive Delta-s={float(np.sum(predictive_positive)):.3e}, "
+        f"sum emergency Delta-s={float(np.sum(emergency_positive)):.3e}"
+    )
 
 
 def main() -> None:
@@ -791,35 +1266,96 @@ def main() -> None:
     parser.add_argument("--d-max-conservative", type=float, default=2.4)
     parser.add_argument("--alpha-h-conservative", type=float, default=0.45)
     parser.add_argument("--alpha-v-conservative", type=float, default=0.45)
-    parser.add_argument("--thrust-derating", type=float, default=1.0)
-    parser.add_argument("--relaxation-recovery-gain", type=float, default=0.8)
-    parser.add_argument("--relaxation-barrier-gain", type=float, default=0.20)
     parser.add_argument(
-        "--relaxation-domain-margin-ratio",
+        "--thrust-derating",
         type=float,
-        default=0.02,
+        default=1.0,
         help=(
-            "positive adaptive-domain margin as a fraction of the "
-            "conservative-to-physical h-reserve"
+            "uniform scale applied to the BlueROV2 T200 forward/reverse "
+            "force bounds; e.g. 0.4 gives 40% of nominal authority"
         ),
     )
     parser.add_argument(
+        "--virtual-linear-gain",
+        type=float,
+        default=0.55,
+        help="linear part of K_eta; reduce this to soften translational barrier response",
+    )
+    parser.add_argument(
+        "--virtual-angular-gain",
+        type=float,
+        default=0.80,
+        help="angular part of K_eta",
+    )
+    parser.add_argument(
+        "--command-filter-linear-bandwidth",
+        type=float,
+        default=3.0,
+        help="linear command-filter bandwidth [rad/s]; smaller values smooth sharp virtual commands",
+    )
+    parser.add_argument(
+        "--command-filter-angular-bandwidth",
+        type=float,
+        default=4.0,
+        help="angular command-filter bandwidth [rad/s]",
+    )
+    parser.add_argument(
+        "--alpha-gain",
+        type=float,
+        default=0.8,
+        help="CLF decay gain",
+    )
+    parser.add_argument("--relaxation-recovery-gain", type=float, default=0.8)
+    parser.add_argument("--relaxation-barrier-gain", type=float, default=0.20)
+    parser.add_argument(
         "--relaxation-activation-on-ratio",
         type=float,
-        default=0.001,
+        default=0.10,
         help=(
-            "residual-margin ratio below which the smooth relaxation "
-            "activation is fully on"
+            "h_on / h_d,c: activation is fully on below this adaptive margin"
         ),
     )
     parser.add_argument(
         "--relaxation-activation-off-ratio",
         type=float,
-        default=0.1,
+        default=0.30,
         help=(
-            "residual-margin ratio above which relaxation is exactly off; "
-            "the small default delays activation until close to the "
-            "conservative boundary"
+            "h_off / h_d,c: activation is exactly off above this margin"
+        ),
+    )
+    parser.add_argument(
+        "--relaxation-infeasibility-epsilon",
+        type=float,
+        default=1e-3,
+        help="epsilon_delta in the required-slack gate gamma",
+    )
+    parser.add_argument(
+        "--sampled-guard-margin-ratio",
+        type=float,
+        default=0.02,
+        help=(
+            "implementation-only sampled guard h_guard / rho_bar; "
+            "the default is preserved, while smaller values let the "
+            "continuous adaptive law act closer to the barrier"
+        ),
+    )
+    parser.add_argument(
+        "--range-stress-distance",
+        type=float,
+        default=None,
+        help=(
+            "optional norm [m] of formation D, preserving its direction; "
+            "the default keeps the original Gazebo-aligned D reference"
+        ),
+    )
+    parser.add_argument(
+        "--range-stress-leader-speed",
+        type=float,
+        default=None,
+        help=(
+            "optional leader speed [m/s] from t=60 to 65 s along the "
+            "formation-D direction; used to demonstrate authority-triggered "
+            "range relaxation with an interior equilibrium"
         ),
     )
     parser.add_argument("--frame-stride", type=int, default=4)
@@ -841,6 +1377,15 @@ def main() -> None:
 
     apply_visualization_style(paper_quality=args.paper_quality)
 
+    if args.range_stress_distance is not None or args.range_stress_leader_speed is not None:
+        stress_relative = _range_stress_relative(args.range_stress_distance)
+        print(
+            "Range-stress override: "
+            f"||p_21,d^D||={np.linalg.norm(stress_relative):.3f} m, "
+            f"leader speed={0.0 if args.range_stress_leader_speed is None else args.range_stress_leader_speed:.3f} m/s "
+            "during t in [60, 65) s"
+        )
+
     result = simulate(
         duration=args.duration,
         dt=args.dt,
@@ -850,11 +1395,19 @@ def main() -> None:
         alpha_h_conservative=args.alpha_h_conservative,
         alpha_v_conservative=args.alpha_v_conservative,
         thrust_derating=args.thrust_derating,
+        virtual_linear_gain=args.virtual_linear_gain,
+        virtual_angular_gain=args.virtual_angular_gain,
+        command_filter_linear_bandwidth=args.command_filter_linear_bandwidth,
+        command_filter_angular_bandwidth=args.command_filter_angular_bandwidth,
+        alpha_gain=args.alpha_gain,
         relaxation_recovery_gain=args.relaxation_recovery_gain,
         relaxation_barrier_gain=args.relaxation_barrier_gain,
-        relaxation_domain_margin_ratio=args.relaxation_domain_margin_ratio,
         relaxation_activation_on_ratio=args.relaxation_activation_on_ratio,
         relaxation_activation_off_ratio=args.relaxation_activation_off_ratio,
+        relaxation_infeasibility_epsilon=args.relaxation_infeasibility_epsilon,
+        range_stress_distance=args.range_stress_distance,
+        range_stress_leader_speed=args.range_stress_leader_speed,
+        sampled_guard_margin_ratio=args.sampled_guard_margin_ratio,
     )
 
     print_summary(result)
@@ -865,6 +1418,16 @@ def main() -> None:
         "fov_horizontal": plot_fov(result, 0),
         "fov_vertical": plot_fov(result, 1),
         "domain_enlargement": plot_normalized_relaxation(result),
+        "relaxation_mechanism_diagnostics": plot_relaxation_mechanism_diagnostics(
+            result, channel=1
+        ),
+        "velocity_linear_body": plot_generalized_velocity_diagnostics(
+            result, angular=False
+        ),
+        "velocity_angular_body": plot_generalized_velocity_diagnostics(
+            result, angular=True
+        ),
+        "thruster_diagnostics": plot_thruster_diagnostics(result),
     }
 
     animation = None

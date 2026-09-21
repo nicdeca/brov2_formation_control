@@ -49,7 +49,6 @@ def main() -> None:
             virtual_linear_speed_limit=1.5,
             virtual_angular_speed_limit=2.0,
             relaxation_recovery_gain=0.8,
-            relaxation_domain_margin_ratio=0.1,
             slack_linear_penalty=100.0,
             slack_quadratic_penalty=5e3,
             realism=RealismConfig(),

@@ -121,10 +121,16 @@ class FollowerTaskConfig:
     adaptive: bool = True
     relaxation_recovery_gain: float = 0.8
     relaxation_barrier_gain: float = 0.20
-    relaxation_domain_margin_ratio: float = 0.10
     relaxation_activation_on_ratio: float = 0.10
     relaxation_activation_off_ratio: float = 0.30
+    relaxation_infeasibility_epsilon: float = 1e-3
+    # Legacy logging field kept so existing bag/plot schemas remain readable.
+    # It is not used by the adaptive-domain controller anymore.
+    relaxation_domain_margin_ratio: float = 0.10
     use_parent_velocity_in_clf: bool = False
+    # Paper default: h_delta=d-d_min^c and h_Delta=d_max^c-d.
+    # Set True only to recover the legacy squared-distance formulation.
+    use_squared_distance_constraints: bool = False
 
 
 @dataclass(frozen=True)
@@ -362,6 +368,7 @@ class FollowerCoreRuntime:
             d_max=task_config.d_max,
             d_min_conservative=task_config.d_min_conservative,
             d_max_conservative=task_config.d_max_conservative,
+            squared=task_config.use_squared_distance_constraints,
         )
         self.fov_domain = FieldOfViewDomain(
             alpha_h_conservative=task_config.alpha_h_conservative,
@@ -380,14 +387,16 @@ class FollowerCoreRuntime:
         self._templates = _AdaptiveTemplates(
             collision=AdaptiveConstraintBarrierPotential(
                 constraint=MinimumDistanceConstraint(
-                    self.distance_domain.d_min_conservative
+                    self.distance_domain.d_min_conservative,
+                    squared=self.distance_domain.squared,
                 ),
                 reference_state=desired_relative,
                 weight=task_config.collision_barrier_weight,
             ),
             sensing_range=AdaptiveConstraintBarrierPotential(
                 constraint=MaximumDistanceConstraint(
-                    self.distance_domain.d_max_conservative
+                    self.distance_domain.d_max_conservative,
+                    squared=self.distance_domain.squared,
                 ),
                 reference_state=desired_relative,
                 weight=task_config.range_barrier_weight,
@@ -408,25 +417,10 @@ class FollowerCoreRuntime:
             ),
         )
 
-        self.relaxation = FunnelRelaxationPolicy(
-            maximum_enlargement=np.array(
-                [
-                    self.distance_domain.collision_enlargement_max,
-                    self.distance_domain.range_enlargement_max,
-                    self.fov_domain.horizontal_enlargement_max,
-                    self.fov_domain.vertical_enlargement_max,
-                ],
-                dtype=float,
-            ),
-            recovery_gain=task_config.relaxation_recovery_gain,
-            barrier_gain=task_config.relaxation_barrier_gain,
-            domain_margin_ratio=task_config.relaxation_domain_margin_ratio,
-            activation_on_ratio=task_config.relaxation_activation_on_ratio,
-            activation_off_ratio=task_config.relaxation_activation_off_ratio,
-            minimum_constraint_margin=1e-5,
-        )
+        self.relaxation = self._build_relaxation_policy(desired_relative)
         self._enabled_relaxation = np.ones(4, dtype=bool)
         self._relaxation_state = np.zeros(4)
+        self._previous_sensing_constraint_values: np.ndarray | None = None
         self._filter_state: np.ndarray | None = None
         self._integrator = RK4Integrator()
 
@@ -480,6 +474,66 @@ class FollowerCoreRuntime:
             )
         return desired.copy()
 
+    def _desired_conservative_constraint_values(
+        self,
+        desired_relative_position: np.ndarray,
+    ) -> np.ndarray:
+        """h^{d,c} for [collision, range, horizontal FoV, vertical FoV]."""
+        collision = MinimumDistanceConstraint(
+            self.distance_domain.d_min_conservative,
+            squared=self.distance_domain.squared,
+        )
+        sensing_range = MaximumDistanceConstraint(
+            self.distance_domain.d_max_conservative,
+            squared=self.distance_domain.squared,
+        )
+        return np.array(
+            [
+                collision.value(desired_relative_position),
+                sensing_range.value(desired_relative_position),
+                self.fov_domain.alpha_h_conservative**2,
+                self.fov_domain.alpha_v_conservative**2,
+            ],
+            dtype=float,
+        )
+
+    def _build_relaxation_policy(
+        self,
+        desired_relative_position: np.ndarray,
+    ) -> FunnelRelaxationPolicy:
+        cfg = self.task_config
+        return FunnelRelaxationPolicy(
+            maximum_enlargement=np.array(
+                [
+                    self.distance_domain.collision_enlargement_max,
+                    self.distance_domain.range_enlargement_max,
+                    self.fov_domain.horizontal_enlargement_max,
+                    self.fov_domain.vertical_enlargement_max,
+                ],
+                dtype=float,
+            ),
+            desired_conservative_values=(
+                self._desired_conservative_constraint_values(
+                    desired_relative_position
+                )
+            ),
+            barrier_weights=np.array(
+                [
+                    cfg.collision_barrier_weight,
+                    cfg.range_barrier_weight,
+                    cfg.horizontal_fov_barrier_weight,
+                    cfg.vertical_fov_barrier_weight,
+                ],
+                dtype=float,
+            ),
+            recovery_gain=cfg.relaxation_recovery_gain,
+            barrier_gain=cfg.relaxation_barrier_gain,
+            activation_on_ratio=cfg.relaxation_activation_on_ratio,
+            activation_off_ratio=cfg.relaxation_activation_off_ratio,
+            infeasibility_epsilon=cfg.relaxation_infeasibility_epsilon,
+            minimum_constraint_margin=1e-8,
+        )
+
     def set_desired_relative_position(
         self,
         desired_relative_position,
@@ -500,20 +554,25 @@ class FollowerCoreRuntime:
         self._templates = _AdaptiveTemplates(
             collision=AdaptiveConstraintBarrierPotential(
                 constraint=MinimumDistanceConstraint(
-                    self.distance_domain.d_min_conservative
+                    self.distance_domain.d_min_conservative,
+                    squared=self.distance_domain.squared,
                 ),
                 reference_state=desired,
                 weight=cfg.collision_barrier_weight,
             ),
             sensing_range=AdaptiveConstraintBarrierPotential(
                 constraint=MaximumDistanceConstraint(
-                    self.distance_domain.d_max_conservative
+                    self.distance_domain.d_max_conservative,
+                    squared=self.distance_domain.squared,
                 ),
                 reference_state=desired,
                 weight=cfg.range_barrier_weight,
             ),
             horizontal_fov=self._templates.horizontal_fov,
             vertical_fov=self._templates.vertical_fov,
+        )
+        self.relaxation = self.relaxation.with_desired_conservative_values(
+            self._desired_conservative_constraint_values(desired)
         )
 
     def _edge_potential(self) -> EdgePotential:
@@ -529,12 +588,18 @@ class FollowerCoreRuntime:
             vertical = self._templates.vertical_fov.bind(float(enlargement[3]))
         else:
             collision = ConstraintBarrierPotential.from_reference(
-                MinimumDistanceConstraint(self.distance_domain.d_min_conservative),
+                MinimumDistanceConstraint(
+                    self.distance_domain.d_min_conservative,
+                    squared=self.distance_domain.squared,
+                ),
                 desired_relative,
                 weight=cfg.collision_barrier_weight,
             )
             sensing_range = ConstraintBarrierPotential.from_reference(
-                MaximumDistanceConstraint(self.distance_domain.d_max_conservative),
+                MaximumDistanceConstraint(
+                    self.distance_domain.d_max_conservative,
+                    squared=self.distance_domain.squared,
+                ),
                 desired_relative,
                 weight=cfg.range_barrier_weight,
             )
@@ -578,12 +643,13 @@ class FollowerCoreRuntime:
                 follower_state,
                 parent_state[:3],
             )
-            projected, _ = self.relaxation.project_to_current_domain(
-                self._relaxation_state,
-                sensing_values.values,
-                enabled=self._enabled_relaxation,
+            self._relaxation_state = (
+                self.relaxation.initialize_for_constraint_values(
+                    sensing_values.values,
+                    enabled=self._enabled_relaxation,
+                )
             )
-            self._relaxation_state = projected
+            self._previous_sensing_constraint_values = sensing_values.values.copy()
 
         workspace_reference = (
             parent_state[:3] - self._desired_relative_position
@@ -633,7 +699,16 @@ class FollowerCoreRuntime:
             follower_state,
             parent_state[:3],
         )
+        if self._previous_sensing_constraint_values is None:
+            sensing_constraint_rates = np.zeros(4, dtype=float)
+        else:
+            sensing_constraint_rates = (
+                sensing_values.values - self._previous_sensing_constraint_values
+            ) / dt
 
+        # Continuous-time invariance does not prevent a finite sampled plant
+        # step from landing just outside h_a>0.  Repair only that sampled-data
+        # mismatch before evaluating the logarithmic barrier.
         if self.task_config.adaptive:
             projected, _ = self.relaxation.project_to_current_domain(
                 self._relaxation_state,
@@ -693,16 +768,31 @@ class FollowerCoreRuntime:
         relaxation_rate = np.zeros(4, dtype=float)
         next_relaxation_state = relaxation_state.copy()
         if self.task_config.adaptive:
+            if evaluation.required_slack is None:
+                raise RuntimeError(
+                    "adaptive sensing-domain relaxation requires thruster-space "
+                    "actuation-feasibility diagnostics (required_slack)."
+                )
             (
                 next_relaxation_state,
                 relaxation_rate,
             ) = self.relaxation.advance(
                 relaxation_state,
                 conservative_values=sensing_values.values,
+                required_slack=float(evaluation.required_slack),
                 enabled=self._enabled_relaxation,
                 sample_time=dt,
             )
+            next_relaxation_state, _ = self.relaxation.project_to_predicted_domain(
+                next_relaxation_state,
+                sensing_values.values,
+                sensing_constraint_rates,
+                sample_time=dt,
+                enabled=self._enabled_relaxation,
+            )
+            relaxation_rate = (next_relaxation_state - relaxation_state) / dt
 
+        self._previous_sensing_constraint_values = sensing_values.values.copy()
         controller_time_s = perf_counter() - start_time
 
         # Build the complete experiment record from this SAME evaluation.
@@ -737,9 +827,7 @@ class FollowerCoreRuntime:
         # assembled, so snapshot[s] and snapshot[s_dot] correspond to x_k and
         # the control input generated at the same timer tick.
         if self.task_config.adaptive:
-            # Implicit sampled-data update of the continuous auxiliary law.
-            # FunnelRelaxationPolicy.advance() applies the upper projection
-            # and therefore keeps the adaptive-domain state in [0, 1].
+            # Projected sampled-data update of the paper law; s remains in [0, 1].
             self._relaxation_state = next_relaxation_state.copy()
 
         self._workspace.state = workspace_relaxation_state
@@ -784,6 +872,7 @@ class FollowerCoreRuntime:
             ),
             snapshot=snapshot,
         )
+
 
 
 class LeaderCoreRuntime:

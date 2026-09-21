@@ -5,18 +5,18 @@ drift wrench.  Two BlueROV2 followers observe the leader through forward
 cameras and regulate desired relative positions while keeping the target
 centered in the image.
 
-The example supports conservative distance/FoV barriers and optional
-smooth barrier-potential relaxation of the conservative sensing domains.
-The physical CLF-QP treats the current funnel state as frozen and optimizes
-only the physical actuator input.  The auxiliary funnel dynamics depend only
-on the current constraint values and therefore do not require parent velocity
-or constraint derivatives.
+The example supports conservative distance/FoV barriers and the adaptive-domain
+mechanism used in the paper.  The physical CLF-QP treats the current adaptive
+state as frozen.  The auxiliary dynamics are activated only when a constraint
+margin is small and the zero-relaxation CLF condition is incompatible with the
+actuator limits, as measured by the exact required CLF slack.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+from datetime import datetime
 from dataclasses import dataclass, replace
 from pathlib import Path
 from time import perf_counter
@@ -329,8 +329,8 @@ def build_agent_controller(
 ) -> BlueROV2ControllerDesign:
     """Build the physical CLF-QP controller.
 
-    Adaptive funnel relaxation does not augment the CLF-QP decision vector.
-    The current funnel state changes the potential, but its auxiliary dynamics
+    Adaptive-domain relaxation does not augment the CLF-QP decision vector.
+    The current adaptive state changes the potential, but its auxiliary dynamics
     are handled independently.
     """
     return build_bluerov2_controller_design(
@@ -352,15 +352,38 @@ def build_agent_controller(
 def build_relaxation_policy(
     distance_domain: DistanceDomain,
     fov_domain: FieldOfViewDomain,
+    desired_relative_position: np.ndarray,
     *,
-    distance_constraints: bool,
-    fov_constraints: bool,
-    recovery_gain: float,
-    barrier_gain: float,
-    domain_margin_ratio: float,
-    activation_on_ratio: float,
-    activation_off_ratio: float,
+    distance_constraints: bool = True,
+    fov_constraints: bool = True,
+    recovery_gain: float = 0.8,
+    barrier_gain: float = 0.20,
+    activation_on_ratio: float = 0.10,
+    activation_off_ratio: float = 0.30,
+    infeasibility_epsilon: float = 1e-3,
 ) -> FunnelRelaxationPolicy:
+    """Build the paper adaptive-domain law for one follower edge."""
+    desired_relative = np.asarray(desired_relative_position, dtype=float)
+    desired_image = NormalizedImagePoint(0.0, 0.0)
+    desired_values = np.array(
+        [
+            MinimumDistanceConstraint(
+                distance_domain.d_min_conservative,
+                squared=distance_domain.squared,
+            ).evaluate(desired_relative).value,
+            MaximumDistanceConstraint(
+                distance_domain.d_max_conservative,
+                squared=distance_domain.squared,
+            ).evaluate(desired_relative).value,
+            HorizontalFieldOfViewConstraint(
+                fov_domain.alpha_h_conservative
+            ).evaluate(desired_image).value,
+            VerticalFieldOfViewConstraint(
+                fov_domain.alpha_v_conservative
+            ).evaluate(desired_image).value,
+        ],
+        dtype=float,
+    )
     maximum = np.array(
         [
             distance_domain.collision_enlargement_max if distance_constraints else 0.0,
@@ -372,12 +395,14 @@ def build_relaxation_policy(
     )
     return FunnelRelaxationPolicy(
         maximum_enlargement=maximum,
+        desired_conservative_values=desired_values,
+        barrier_weights=np.array([0.18, 0.18, 0.25, 0.25], dtype=float),
         recovery_gain=recovery_gain,
         barrier_gain=barrier_gain,
-        domain_margin_ratio=domain_margin_ratio,
         activation_on_ratio=activation_on_ratio,
         activation_off_ratio=activation_off_ratio,
-        minimum_constraint_margin=1e-5,
+        infeasibility_epsilon=infeasibility_epsilon,
+        minimum_constraint_margin=1e-8,
     )
 
 
@@ -598,9 +623,9 @@ def simulate(
     virtual_angular_speed_limit: float = 2.0,
     relaxation_recovery_gain: float = 0.8,
     relaxation_barrier_gain: float = 0.20,
-    relaxation_domain_margin_ratio: float = 0.10,
     relaxation_activation_on_ratio: float = 0.10,
     relaxation_activation_off_ratio: float = 0.30,
+    relaxation_infeasibility_epsilon: float = 1e-3,
     thruster_force_limits: T200ForceLimits | None = None,
 ) -> tuple[
     FormationScenario,
@@ -647,17 +672,6 @@ def simulate(
     )
     controller = controller_design.agent_controller
 
-    relaxation = build_relaxation_policy(
-        distance_domain,
-        fov_domain,
-        distance_constraints=distance_constraints,
-        fov_constraints=fov_constraints,
-        recovery_gain=relaxation_recovery_gain,
-        barrier_gain=relaxation_barrier_gain,
-        domain_margin_ratio=relaxation_domain_margin_ratio,
-        activation_on_ratio=relaxation_activation_on_ratio,
-        activation_off_ratio=relaxation_activation_off_ratio,
-    )
     enabled_relaxation = relaxation_enabled_mask(
         distance_constraints=distance_constraints,
         fov_constraints=fov_constraints,
@@ -673,8 +687,11 @@ def simulate(
         stress_scale=stress_scale,
     )
     relaxation_state = np.zeros((scenario.n_agents, 4), dtype=float)
-    guard_activation_count = 0
-    guard_maximum_correction = 0.0
+    previous_conservative_values = np.full((scenario.n_agents, 4), np.nan)
+    predictive_guard_count = 0
+    predictive_guard_maximum_correction = 0.0
+    emergency_guard_count = 0
+    emergency_guard_maximum_correction = 0.0
     fallback_mode = np.zeros(scenario.n_agents, dtype=bool)
     fallback_positions = states[:, :3].copy()
     fallback_times = np.full(scenario.n_agents, np.nan)
@@ -692,6 +709,21 @@ def simulate(
         )
         for edge in scenario.graph
     }
+    relaxation_policies = {
+        edge.observer: build_relaxation_policy(
+            distance_domain,
+            fov_domain,
+            scenario.desired_relative_position(edge.observer, edge.target),
+            distance_constraints=distance_constraints,
+            fov_constraints=fov_constraints,
+            recovery_gain=relaxation_recovery_gain,
+            barrier_gain=relaxation_barrier_gain,
+            activation_on_ratio=relaxation_activation_on_ratio,
+            activation_off_ratio=relaxation_activation_off_ratio,
+            infeasibility_epsilon=relaxation_infeasibility_epsilon,
+        )
+        for edge in scenario.graph
+    }
     if adaptive:
         for edge in scenario.graph:
             try:
@@ -703,12 +735,13 @@ def simulate(
                     states[edge.observer],
                     states[edge.target],
                 )
-                projected, correction = relaxation.project_to_current_domain(
-                    relaxation_state[edge.observer],
+                policy = relaxation_policies[edge.observer]
+                initialized = policy.initialize_for_constraint_values(
                     kinematics.values,
                     enabled=enabled_relaxation,
                 )
-                relaxation_state[edge.observer] = projected
+                correction = initialized - relaxation_state[edge.observer]
+                relaxation_state[edge.observer] = initialized
                 if np.any(correction > 0.0):
                     guard_activation_count += 1
                     guard_maximum_correction = max(
@@ -730,7 +763,7 @@ def simulate(
             )
             continue
 
-        rho = relaxation.enlargement(relaxation_state[edge.observer])
+        rho = relaxation_policies[edge.observer].enlargement(relaxation_state[edge.observer])
         potential = build_edge_potential(
             scenario,
             camera,
@@ -863,7 +896,12 @@ def simulate(
         positions[sample] = states[:, :3]
         quaternions[sample] = states[:, 3:7]
         for agent in range(scenario.n_agents):
-            rho_history[sample, agent] = relaxation.enlargement(relaxation_state[agent])
+            if agent in relaxation_policies:
+                rho_history[sample, agent] = relaxation_policies[agent].enlargement(
+                    relaxation_state[agent]
+                )
+            else:
+                rho_history[sample, agent] = 0.0
             inertial_velocities[sample, agent] = inertial_linear_velocity(
                 model,
                 states[agent],
@@ -938,8 +976,6 @@ def simulate(
 
             start_time = perf_counter()
 
-            relaxation_evaluation = None
-
             # Evaluate the sensing constraints before evaluating any logarithmic
             # potential.  This also gives the non-adaptive baseline a graceful
             # failure mode instead of allowing log(h_c) to raise ValueError.
@@ -973,45 +1009,19 @@ def simulate(
                 )
                 continue
 
-            if adaptive:
-                try:
-                    projected, correction = relaxation.project_to_current_domain(
-                        relaxation_state[observer],
-                        kinematics.values,
-                        enabled=enabled_relaxation,
-                    )
-                    relaxation_state[observer] = projected
-                    if np.any(correction > 0.0):
-                        guard_activation_count += 1
-                        guard_maximum_correction = max(
-                            guard_maximum_correction,
-                            float(np.max(correction)),
-                        )
-                except FunnelRelaxationInfeasibleError as error:
-                    activate_fallback(
-                        observer,
-                        time=times[step],
-                        reason=str(error),
-                    )
-                    requested_wrench = stationkeeping_wrench(
-                        model,
-                        states[observer],
-                        fallback_positions[observer],
-                    )
-                    hold_allocation = allocation.bounded_least_squares(requested_wrench)
-                    controls[step, observer] = hold_allocation.forces
-                    next_states[observer] = plant_integrator.step(
-                        model,
-                        states[observer],
-                        hold_allocation.achieved_wrench,
-                        dt,
-                    )
-                    continue
+            if np.all(np.isfinite(previous_conservative_values[observer])):
+                conservative_rates = (
+                    kinematics.values - previous_conservative_values[observer]
+                ) / dt
             else:
+                conservative_rates = np.zeros(4, dtype=float)
+            previous_conservative_values[observer] = kinematics.values.copy()
+
+            if not adaptive:
                 failure_reason = conservative_domain_failure_reason(
                     kinematics.values,
                     enabled=enabled_relaxation,
-                    minimum_margin=relaxation.minimum_constraint_margin,
+                    minimum_margin=1e-8,
                 )
                 if failure_reason is not None:
                     activate_fallback(
@@ -1034,7 +1044,38 @@ def simulate(
                     )
                     continue
 
-            rho = relaxation.enlargement(relaxation_state[observer])
+            if adaptive:
+                try:
+                    projected, correction = relaxation_policies[observer].project_to_current_domain(
+                        relaxation_state[observer],
+                        kinematics.values,
+                        enabled=enabled_relaxation,
+                    )
+                except FunnelRelaxationInfeasibleError as error:
+                    activate_fallback(observer, time=times[step], reason=str(error))
+                    projected = relaxation_state[observer]
+                    correction = np.zeros(4)
+                if not fallback_mode[observer]:
+                    relaxation_state[observer] = projected
+                    next_relaxation_state[observer] = projected
+                    if np.any(correction > 0.0):
+                        emergency_guard_count += 1
+                        emergency_guard_maximum_correction = max(
+                            emergency_guard_maximum_correction,
+                            float(np.max(correction)),
+                        )
+                else:
+                    requested_wrench = stationkeeping_wrench(
+                        model, states[observer], fallback_positions[observer]
+                    )
+                    hold_allocation = allocation.bounded_least_squares(requested_wrench)
+                    controls[step, observer] = hold_allocation.forces
+                    next_states[observer] = plant_integrator.step(
+                        model, states[observer], hold_allocation.achieved_wrench, dt
+                    )
+                    continue
+
+            rho = relaxation_policies[observer].enlargement(relaxation_state[observer])
             potential = build_edge_potential(
                 scenario,
                 camera,
@@ -1052,7 +1093,7 @@ def simulate(
                 states[target],
             )
 
-            # Primary layer: physical CLF-QP with the current funnel state
+            # Primary layer: physical CLF-QP with the current adaptive state
             # frozen. Neither V_s nor (partial V / partial s) v enters the
             # CLF inequality.
             try:
@@ -1084,39 +1125,6 @@ def simulate(
                 )
                 controller_times[step, observer] = perf_counter() - start_time
                 continue
-
-            # Secondary layer: smooth barrier-gradient dynamics for s_dot.
-            # The law uses only the current constraint values, becomes strongly
-            # repulsive near the prescribed positive adaptive margin, and
-            # otherwise recovers s -> 0.
-            if adaptive:
-                try:
-                    relaxation_evaluation = relaxation.evaluate(
-                        relaxation_state[observer],
-                        conservative_values=kinematics.values,
-                        enabled=enabled_relaxation,
-                    )
-                except FunnelRelaxationInfeasibleError as error:
-                    activate_fallback(
-                        observer,
-                        time=times[step],
-                        reason=str(error),
-                    )
-                    requested_wrench = stationkeeping_wrench(
-                        model,
-                        states[observer],
-                        fallback_positions[observer],
-                    )
-                    hold_allocation = allocation.bounded_least_squares(requested_wrench)
-                    controls[step, observer] = hold_allocation.forces
-                    next_states[observer] = plant_integrator.step(
-                        model,
-                        states[observer],
-                        hold_allocation.achieved_wrench,
-                        dt,
-                    )
-                    controller_times[step, observer] = perf_counter() - start_time
-                    continue
 
             controller_times[step, observer] = perf_counter() - start_time
 
@@ -1222,13 +1230,43 @@ def simulate(
             clf_hard_residuals[step, observer] = hard_residual
 
             if adaptive:
-                assert relaxation_evaluation is not None
-                relaxation_rate = relaxation_evaluation.selected_rate
-                relaxation_rate_history[step, observer] = relaxation_rate
-                next_relaxation_state[observer] = np.maximum(
-                    relaxation_state[observer] + dt * relaxation_rate,
-                    0.0,
+                required_slack = (
+                    0.0
+                    if evaluation.required_slack is None
+                    else max(float(evaluation.required_slack), 0.0)
                 )
+                try:
+                    next_state, _ = relaxation_policies[observer].advance(
+                        relaxation_state[observer],
+                        conservative_values=kinematics.values,
+                        required_slack=required_slack,
+                        enabled=enabled_relaxation,
+                        sample_time=dt,
+                    )
+                    next_state, predictive_correction = (
+                        relaxation_policies[observer].project_to_predicted_domain(
+                            next_state,
+                            kinematics.values,
+                            conservative_rates,
+                            sample_time=dt,
+                            enabled=enabled_relaxation,
+                        )
+                    )
+                    if np.any(predictive_correction > 0.0):
+                        predictive_guard_count += 1
+                        predictive_guard_maximum_correction = max(
+                            predictive_guard_maximum_correction,
+                            float(np.max(predictive_correction)),
+                        )
+                    relaxation_rate = (
+                        next_state - relaxation_state[observer]
+                    ) / dt
+                except FunnelRelaxationInfeasibleError as error:
+                    activate_fallback(observer, time=times[step], reason=str(error))
+                    next_state = relaxation_state[observer]
+                    relaxation_rate = np.zeros(4)
+                next_relaxation_state[observer] = next_state
+                relaxation_rate_history[step, observer] = relaxation_rate
 
             filters[observer] = filter_integrator.step(
                 controller.dynamics_controller.command_filter,
@@ -1249,10 +1287,16 @@ def simulate(
 
     if adaptive:
         print(
-            "Sampled-data funnel safeguard: "
-            f"{guard_activation_count} activations, "
-            f"maximum normalized correction "
-            f"{guard_maximum_correction:.3e}"
+            "Predictive sampled guard: "
+            f"{predictive_guard_count} adjusted follower-samples, "
+            "maximum normalized adjustment "
+            f"{predictive_guard_maximum_correction:.3e}"
+        )
+        print(
+            "Emergency sampled projection: "
+            f"{emergency_guard_count} adjusted follower-samples, "
+            "maximum normalized adjustment "
+            f"{emergency_guard_maximum_correction:.3e}"
         )
 
     trajectory = FormationTrajectory(
@@ -1436,11 +1480,12 @@ def plot_distance_diagnostics(
     for edge in scenario.graph:
         relative = trajectory.positions[:, edge.target] - trajectory.positions[:, edge.observer]
         distance = np.linalg.norm(relative, axis=1)
-        axes.plot(
+        measured_line = axes.plot(
             trajectory.times,
             distance,
             label=f"distance {edge.observer} → {edge.target}",
-        )
+        )[0]
+        edge_color = measured_line.get_color()
 
         if adaptive:
             minimum = np.array(
@@ -1459,33 +1504,39 @@ def plot_distance_diagnostics(
                 trajectory.times,
                 minimum,
                 linestyle="--",
+                color=edge_color,
                 label=f"effective d_min, agent {edge.observer}",
             )
             axes.plot(
                 trajectory.times,
                 maximum,
                 linestyle="--",
+                color=edge_color,
                 label=f"effective d_max, agent {edge.observer}",
             )
 
     axes.axhline(
         distance_domain.d_min_conservative,
-        linestyle="--",
+        linestyle="-.",
+        color="0.50",
         label="conservative d_min",
     )
     axes.axhline(
         distance_domain.d_max_conservative,
-        linestyle="--",
+        linestyle="-.",
+        color="0.50",
         label="conservative d_max",
     )
     axes.axhline(
         distance_domain.d_min,
         linestyle=":",
+        color="0.15",
         label="physical d_min",
     )
     axes.axhline(
         distance_domain.d_max,
         linestyle=":",
+        color="0.15",
         label="physical d_max",
     )
     axes.set_xlabel(r"$t$ [s]")
@@ -1510,11 +1561,12 @@ def plot_fov_diagnostics(
 
     for edge in scenario.graph:
         observer = edge.observer
-        axes_h.plot(
+        measured_line = axes_h.plot(
             trajectory.times,
             image_history[:, observer, 0],
             label=f"alpha_h, agent {observer}",
-        )
+        )[0]
+        edge_color = measured_line.get_color()
 
         if adaptive:
             limit = np.array(
@@ -1527,26 +1579,30 @@ def plot_fov_diagnostics(
                 trajectory.times,
                 limit,
                 linestyle="--",
+                color=edge_color,
                 label=f"+effective limit, agent {observer}",
             )
             axes_h.plot(
                 trajectory.times,
                 -limit,
                 linestyle="--",
+                color=edge_color,
                 label=f"-effective limit, agent {observer}",
             )
 
     axes_h.axhline(
         fov_domain.alpha_h_conservative,
-        linestyle="--",
+        linestyle="-.",
+        color="0.50",
         label="conservative limit",
     )
     axes_h.axhline(
         -fov_domain.alpha_h_conservative,
-        linestyle="--",
+        linestyle="-.",
+        color="0.50",
     )
-    axes_h.axhline(1.0, linestyle=":", label="physical limit")
-    axes_h.axhline(-1.0, linestyle=":")
+    axes_h.axhline(1.0, linestyle=":", color="0.15", label="physical limit")
+    axes_h.axhline(-1.0, linestyle=":", color="0.15")
     axes_h.set_xlabel(r"$t$ [s]")
     axes_h.set_ylabel(r"$\alpha_h$")
     axes_h.set_title("Horizontal field of view")
@@ -1558,11 +1614,12 @@ def plot_fov_diagnostics(
 
     for edge in scenario.graph:
         observer = edge.observer
-        axes_v.plot(
+        measured_line = axes_v.plot(
             trajectory.times,
             image_history[:, observer, 1],
             label=f"alpha_v, agent {observer}",
-        )
+        )[0]
+        edge_color = measured_line.get_color()
 
         if adaptive:
             limit = np.array(
@@ -1575,26 +1632,30 @@ def plot_fov_diagnostics(
                 trajectory.times,
                 limit,
                 linestyle="--",
+                color=edge_color,
                 label=f"+effective limit, agent {observer}",
             )
             axes_v.plot(
                 trajectory.times,
                 -limit,
                 linestyle="--",
+                color=edge_color,
                 label=f"-effective limit, agent {observer}",
             )
 
     axes_v.axhline(
         fov_domain.alpha_v_conservative,
-        linestyle="--",
+        linestyle="-.",
+        color="0.50",
         label="conservative limit",
     )
     axes_v.axhline(
         -fov_domain.alpha_v_conservative,
-        linestyle="--",
+        linestyle="-.",
+        color="0.50",
     )
-    axes_v.axhline(1.0, linestyle=":", label="physical limit")
-    axes_v.axhline(-1.0, linestyle=":")
+    axes_v.axhline(1.0, linestyle=":", color="0.15", label="physical limit")
+    axes_v.axhline(-1.0, linestyle=":", color="0.15")
     axes_v.set_xlabel(r"$t$ [s]")
     axes_v.set_ylabel(r"$\alpha_v$")
     axes_v.set_title("Vertical field of view")
@@ -2362,8 +2423,10 @@ def plot_domain_enlargement(
     )
 
     figure, axes = plt.subplots()
+    channel_colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    agent_linestyles = ("-", "--", "-.", ":")
 
-    for edge in scenario.graph:
+    for edge_index, edge in enumerate(scenario.graph):
         observer = edge.observer
         for channel, label in enumerate(labels):
             if maxima[channel] <= 0.0:
@@ -2371,6 +2434,8 @@ def plot_domain_enlargement(
             axes.plot(
                 trajectory.times,
                 rho_history[:, observer, channel] / maxima[channel],
+                color=channel_colors[channel % len(channel_colors)],
+                linestyle=agent_linestyles[edge_index % len(agent_linestyles)],
                 label=f"agent {observer}: {label}",
             )
 
@@ -2478,7 +2543,7 @@ def plot_relaxation_rates(
     trajectory: FormationTrajectory,
     relaxation_rate_history: np.ndarray,
 ) -> plt.Figure:
-    """Plot the four independent domain-preserving funnel rates."""
+    """Plot the four independent adaptive-domain rates."""
     figure, axes = plt.subplots()
     labels = (
         r"$v_{\delta}$",
@@ -2488,19 +2553,23 @@ def plot_relaxation_rates(
     )
     control_times = trajectory.times[:-1]
 
-    for edge in scenario.graph:
+    channel_colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    agent_linestyles = ("-", "--", "-.", ":")
+    for edge_index, edge in enumerate(scenario.graph):
         observer = edge.observer
         for channel, label in enumerate(labels):
             axes.plot(
                 control_times,
                 relaxation_rate_history[:, observer, channel],
+                color=channel_colors[channel % len(channel_colors)],
+                linestyle=agent_linestyles[edge_index % len(agent_linestyles)],
                 label=f"agent {observer}: {label}",
             )
 
     axes.axhline(0.0, linewidth=0.8)
     axes.set_xlabel(r"$t$ [s]")
-    axes.set_ylabel(r"normalized funnel rate $v_\ell$ [s$^{-1}$]")
-    axes.set_title("Domain-preserving funnel rates")
+    axes.set_ylabel(r"normalized adaptive-state rate $\dot s_\ell$ [s$^{-1}$]")
+    axes.set_title("Adaptive-domain rates")
     axes.grid(True, alpha=0.3)
     axes.legend(ncol=2)
     figure.tight_layout()
@@ -2561,7 +2630,10 @@ def run_thrust_authority_sweep(
     virtual_linear_speed_limit: float,
     virtual_angular_speed_limit: float,
     relaxation_recovery_gain: float,
-    relaxation_domain_margin_ratio: float,
+    relaxation_barrier_gain: float,
+    relaxation_activation_on_ratio: float,
+    relaxation_activation_off_ratio: float,
+    relaxation_infeasibility_epsilon: float,
     slack_linear_penalty: float,
     slack_quadratic_penalty: float,
 ) -> list[ThrustAuthoritySweepRow]:
@@ -2610,7 +2682,10 @@ def run_thrust_authority_sweep(
             virtual_linear_speed_limit=virtual_linear_speed_limit,
             virtual_angular_speed_limit=virtual_angular_speed_limit,
             relaxation_recovery_gain=relaxation_recovery_gain,
-            relaxation_domain_margin_ratio=(relaxation_domain_margin_ratio),
+            relaxation_barrier_gain=relaxation_barrier_gain,
+            relaxation_activation_on_ratio=relaxation_activation_on_ratio,
+            relaxation_activation_off_ratio=relaxation_activation_off_ratio,
+            relaxation_infeasibility_epsilon=relaxation_infeasibility_epsilon,
         )
 
         maximum = np.array(
@@ -2824,13 +2899,28 @@ def main() -> None:
         help="nominal exponential recovery gain in v_ref = -K_s s",
     )
     parser.add_argument(
-        "--relaxation-domain-margin-ratio",
+        "--relaxation-barrier-gain",
         type=float,
-        default=0.1,
-        help=(
-            "practical adaptive-domain margin as a fraction of each "
-            "conservative-to-physical h-reserve"
-        ),
+        default=0.20,
+        help="adaptive-domain barrier gain k_b",
+    )
+    parser.add_argument(
+        "--relaxation-activation-on-ratio",
+        type=float,
+        default=0.10,
+        help="h_on / h_d,c for the smooth margin activation",
+    )
+    parser.add_argument(
+        "--relaxation-activation-off-ratio",
+        type=float,
+        default=0.30,
+        help="h_off / h_d,c for the smooth margin activation",
+    )
+    parser.add_argument(
+        "--relaxation-infeasibility-epsilon",
+        type=float,
+        default=1e-3,
+        help="epsilon_delta in the required-slack gate gamma",
     )
     parser.add_argument(
         "--stress-test",
@@ -2868,7 +2958,11 @@ def main() -> None:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("outputs/bluerov2_fov_clf_qp"),
+        default=None,
+        help=(
+            "output directory. Stress tests and authority sweeps are saved "
+            "automatically under outputs/bluerov2_fov_clf_qp/ when omitted"
+        ),
     )
     parser.add_argument(
         "--paper-quality",
@@ -2894,6 +2988,25 @@ def main() -> None:
     args = parser.parse_args()
     apply_visualization_style(paper_quality=args.paper_quality)
 
+    auto_save = args.stress_test or args.thrust_authority_sweep is not None
+    save_outputs = args.save or auto_save
+    if save_outputs and args.output_dir is None:
+        kind = (
+            "thrust_authority_sweep"
+            if args.thrust_authority_sweep is not None
+            else "stress_test"
+            if args.stress_test
+            else "run"
+        )
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        args.output_dir = Path("outputs") / "bluerov2_fov_clf_qp" / f"{kind}_{stamp}"
+    elif args.output_dir is None:
+        args.output_dir = Path("outputs/bluerov2_fov_clf_qp")
+
+    if save_outputs:
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Saving diagnostic outputs to: {args.output_dir.resolve()}")
+
     if args.thrust_authority_sweep is not None:
         if args.thrust_authority_sweep:
             deratings = np.array(
@@ -2915,13 +3028,16 @@ def main() -> None:
             stress_scale=args.stress_scale,
             virtual_linear_speed_limit=args.virtual_linear_speed_limit,
             virtual_angular_speed_limit=args.virtual_angular_speed_limit,
-            relaxation_recovery_gain=(args.relaxation_recovery_gain),
-            relaxation_domain_margin_ratio=(args.relaxation_domain_margin_ratio),
+            relaxation_recovery_gain=args.relaxation_recovery_gain,
+            relaxation_barrier_gain=args.relaxation_barrier_gain,
+            relaxation_activation_on_ratio=args.relaxation_activation_on_ratio,
+            relaxation_activation_off_ratio=args.relaxation_activation_off_ratio,
+            relaxation_infeasibility_epsilon=args.relaxation_infeasibility_epsilon,
             slack_linear_penalty=args.slack_linear_penalty,
             slack_quadratic_penalty=(args.slack_quadratic_penalty),
         )
         sweep_figure = plot_thrust_authority_sweep(rows)
-        if args.save:
+        if save_outputs:
             args.output_dir.mkdir(parents=True, exist_ok=True)
             save_thrust_authority_sweep(
                 rows,
@@ -2939,6 +3055,7 @@ def main() -> None:
                 args.output_dir / f"thrust_authority_sweep.{figure_format}",
                 paper_quality=args.paper_quality,
             )
+            print(f"Saved sweep outputs to: {args.output_dir.resolve()}")
         if not args.no_show:
             plt.show()
         return
@@ -2975,7 +3092,10 @@ def main() -> None:
         virtual_linear_speed_limit=args.virtual_linear_speed_limit,
         virtual_angular_speed_limit=args.virtual_angular_speed_limit,
         relaxation_recovery_gain=args.relaxation_recovery_gain,
-        relaxation_domain_margin_ratio=(args.relaxation_domain_margin_ratio),
+        relaxation_barrier_gain=args.relaxation_barrier_gain,
+        relaxation_activation_on_ratio=args.relaxation_activation_on_ratio,
+        relaxation_activation_off_ratio=args.relaxation_activation_off_ratio,
+        relaxation_infeasibility_epsilon=args.relaxation_infeasibility_epsilon,
     )
 
     distance_figure = plot_distance_diagnostics(
@@ -3132,7 +3252,7 @@ def main() -> None:
         sensing_margins["conservative_vertical"],
     )
     print(
-        "Sensing margins before fallback: "
+        "Minimum sensing margins: "
         f"minimum conservative {minimum_conservative_margin:.4g}, "
         f"minimum physical {minimum_physical_margin:.4g}"
     )
@@ -3204,7 +3324,7 @@ def main() -> None:
             title="BlueROV2 camera-constrained formation",
         )
 
-    if args.save:
+    if save_outputs:
         figure_format = (
             args.figure_format
             if args.figure_format is not None
@@ -3247,6 +3367,21 @@ def main() -> None:
             required_slacks,
             args.output_dir / "clf_diagnostics.csv",
         )
+        np.savez_compressed(
+            args.output_dir / "simulation_diagnostics.npz",
+            times=trajectory.times,
+            positions=trajectory.positions,
+            quaternions=trajectory.quaternions,
+            controls=trajectory.controls,
+            slacks=slacks,
+            required_slacks=required_slacks,
+            actuation_margins=actuation_margins,
+            enlargement=rho_history,
+            relaxation_rates=relaxation_rate_history,
+            image_coordinates=image_history,
+            controller_times=controller_times,
+            fallback_times=simulation_status.fallback_times,
+        )
 
         if final_formation_figure is None:
             final_formation_figure, _ = plot_formation_3d(
@@ -3279,6 +3414,8 @@ def main() -> None:
                 paper_quality=args.paper_quality,
                 fps=30,
             )
+
+        print(f"Saved diagnostic outputs to: {args.output_dir.resolve()}")
 
     if not args.no_show:
         plt.show()

@@ -533,6 +533,11 @@ def _selected_plots(args: argparse.Namespace) -> set[str]:
     if args.all:
         selected = set(ALL_PLOTS)
     if not selected:
+        # A dedicated thruster-animation request should not regenerate the
+        # default static paper figures.  Keep the historical default for all
+        # other invocations.
+        if bool(getattr(args, "thruster_animations", False)):
+            return set()
         selected = set(PAPER_PLOTS)
     return selected
 
@@ -1533,6 +1538,13 @@ def _formation_error_figure(data: dict[str, object], paper_quality: bool, show_l
 
 
 
+def _robot_paper_index(robot: object, fallback: int) -> int:
+    """Return the paper robot index i from names such as ``itrl_rov_3``."""
+    suffix = str(robot).rsplit("_", 1)[-1]
+    return int(suffix) if suffix.isdigit() else int(fallback)
+
+
+
 def _thruster_force_figures(
     data: dict[str, object],
     paper_quality: bool,
@@ -1572,11 +1584,12 @@ def _thruster_force_figures(
         _apply_plot_style(paper_quality)
         figure, axis = plt.subplots()
 
+        robot_index = _robot_paper_index(robot, agent + 1)
         for thruster in range(values.shape[1]):
             axis.plot(
                 times[valid],
                 values[valid, thruster],
-                label=f"T{thruster + 1}",
+                label=rf"$f_{{{robot_index},{thruster + 1}}}$",
             )
 
         if np.isfinite(forward_limit):
@@ -1584,7 +1597,7 @@ def _thruster_force_figures(
                 forward_limit,
                 linestyle="--",
                 linewidth=1.2,
-                label="forward limit",
+                label=r"$\bar{f}$",
             )
         if np.isfinite(reverse_limit):
             # The logged reverse limit is a positive force magnitude.
@@ -1594,11 +1607,11 @@ def _thruster_force_figures(
                 -reverse_limit,
                 linestyle="--",
                 linewidth=1.2,
-                label="reverse limit",
+                label=r"$\underline{f}$",
             )
 
         axis.set_xlabel(r"$t$ [s]")
-        axis.set_ylabel("Thruster force [N]")
+        axis.set_ylabel(r"Thruster force $f_{i,k}$ [N]")
         axis.set_title(f"Thruster forces: {robot}")
         axis.grid(True, alpha=0.3)
         axis.legend(ncol=2)
@@ -1608,6 +1621,131 @@ def _thruster_force_figures(
 
     return figures
 
+
+
+def _thruster_force_animations(
+    data: dict[str, object],
+    *,
+    paper_quality: bool,
+    frame_stride: int,
+) -> dict[str, tuple[plt.Figure, FuncAnimation]]:
+    """Animate logged thruster forces and their box limits, one robot per video."""
+    arrays = data["arrays"]
+    robots = data["robots"]
+    times = np.asarray(arrays["times"], dtype=float)
+    forces = np.asarray(arrays["thruster_forces"], dtype=float)
+    force_limits = np.asarray(arrays["thruster_force_limits"], dtype=float)
+
+    animations: dict[str, tuple[plt.Figure, FuncAnimation]] = {}
+
+    for agent, robot in enumerate(robots):
+        values = forces[:, agent, :]
+        if values.ndim != 2:
+            continue
+
+        valid_rows = np.any(np.isfinite(values), axis=1) & np.isfinite(times)
+        if np.count_nonzero(valid_rows) < 2:
+            continue
+
+        limits_history = force_limits[:, agent, :]
+        finite_limits = np.all(np.isfinite(limits_history), axis=1)
+        if np.any(finite_limits):
+            reverse_limit, forward_limit = limits_history[
+                np.flatnonzero(finite_limits)[0]
+            ]
+        else:
+            reverse_limit = np.nan
+            forward_limit = np.nan
+
+        _apply_plot_style(paper_quality)
+        figure, axis = plt.subplots()
+
+        animated_lines: list[tuple[object, np.ndarray]] = []
+        y_series: list[np.ndarray] = []
+        robot_index = _robot_paper_index(robot, agent + 1)
+        for thruster in range(values.shape[1]):
+            line = axis.plot(
+                [], [], label=rf"$f_{{{robot_index},{thruster + 1}}}$"
+            )[0]
+            thruster_values = np.asarray(values[:, thruster], dtype=float)
+            animated_lines.append((line, thruster_values))
+            y_series.append(thruster_values)
+
+        if np.isfinite(forward_limit):
+            axis.axhline(
+                forward_limit,
+                linestyle="--",
+                linewidth=1.2,
+                label=r"$\bar{f}$",
+            )
+            y_series.append(np.array([forward_limit], dtype=float))
+        if np.isfinite(reverse_limit):
+            axis.axhline(
+                -reverse_limit,
+                linestyle="--",
+                linewidth=1.2,
+                label=r"$\underline{f}$",
+            )
+            y_series.append(np.array([-reverse_limit], dtype=float))
+
+        finite_times = times[np.isfinite(times)]
+        axis.set_xlim(float(finite_times[0]), float(finite_times[-1]))
+        axis.set_ylim(*_finite_ylim(y_series))
+        axis.set_xlabel(r"$t$ [s]")
+        axis.set_ylabel(r"Thruster force $f_{i,k}$ [N]")
+        if not paper_quality:
+            axis.set_title(f"Thruster forces: {robot}")
+        axis.grid(True, alpha=0.3)
+        axis.legend(
+            loc="lower center",
+            bbox_to_anchor=(0.5, 1.02),
+            ncol=min(5, values.shape[1] + 2),
+            frameon=False,
+        )
+
+        cursor = axis.axvline(
+            finite_times[0], color="0.35", linewidth=1.2, alpha=0.8
+        )
+        time_text = axis.text(
+            0.985,
+            0.04,
+            "",
+            transform=axis.transAxes,
+            ha="right",
+            va="bottom",
+        )
+        figure.tight_layout()
+
+        frames = _animation_frame_indices(len(times), frame_stride)
+
+        def update(
+            frame: int,
+            *,
+            _lines=animated_lines,
+            _cursor=cursor,
+            _time_text=time_text,
+        ):
+            for line, thruster_values in _lines:
+                line.set_data(times[: frame + 1], thruster_values[: frame + 1])
+            _cursor.set_xdata([times[frame], times[frame]])
+            _time_text.set_text(rf"$t={times[frame]:.1f}\,\mathrm{{s}}$")
+            return [
+                *(line for line, _ in _lines),
+                _cursor,
+                _time_text,
+            ]
+
+        animation = FuncAnimation(
+            figure,
+            update,
+            frames=frames,
+            interval=30,
+            blit=False,
+            repeat=False,
+        )
+        animations[f"thruster_forces_{robot}"] = (figure, animation)
+
+    return animations
 
 def _leader_position_figure(data: dict[str, object], paper_quality: bool):
     """Plot actual and desired leader position component by component."""
@@ -2283,8 +2421,16 @@ def main() -> None:
         "--diagnostic-animations",
         action="store_true",
         help=(
-            "animate formation error and distance/horizontal-FoV/vertical-FoV "
-            "diagnostic plots"
+            "animate formation error, sensing constraints, and per-robot thruster "
+            "input plots"
+        ),
+    )
+    parser.add_argument(
+        "--thruster-animations",
+        action="store_true",
+        help=(
+            "animate only the per-robot thruster input plots; useful when the "
+            "other video diagnostics have already been generated"
         ),
     )
     parser.add_argument(
@@ -2601,7 +2747,24 @@ def main() -> None:
                 show_legends=args.show_legends,
             )
         )
+        diagnostic_animations.update(
+            _thruster_force_animations(
+                data,
+                paper_quality=args.paper_quality,
+                frame_stride=args.frame_stride,
+            )
+        )
 
+    if args.thruster_animations and not args.diagnostic_animations:
+        diagnostic_animations.update(
+            _thruster_force_animations(
+                data,
+                paper_quality=args.paper_quality,
+                frame_stride=args.frame_stride,
+            )
+        )
+
+    if diagnostic_animations:
         control_times = np.asarray(data["arrays"]["times"], dtype=float)
         animation_dt = float(np.median(np.diff(control_times)))
 

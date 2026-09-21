@@ -113,6 +113,7 @@ def evaluate_sensing_constraint_values(
 
     relative_position = target - observer_position
     distance_squared = float(relative_position @ relative_position)
+    distance = float(np.sqrt(distance_squared))
 
     observation = camera.observe(
         observer_position,
@@ -121,10 +122,21 @@ def evaluate_sensing_constraint_values(
     )
     image = observation.image_point.as_array()
 
+    if distance_domain.squared:
+        collision_value = (
+            distance_squared - distance_domain.d_min_conservative**2
+        )
+        range_value = (
+            distance_domain.d_max_conservative**2 - distance_squared
+        )
+    else:
+        collision_value = distance - distance_domain.d_min_conservative
+        range_value = distance_domain.d_max_conservative - distance
+
     values = np.array(
         [
-            distance_squared - distance_domain.d_min_conservative**2,
-            distance_domain.d_max_conservative**2 - distance_squared,
+            collision_value,
+            range_value,
             fov_domain.alpha_h_conservative**2 - image[0] ** 2,
             fov_domain.alpha_v_conservative**2 - image[1] ** 2,
         ],
@@ -170,6 +182,7 @@ def evaluate_sensing_constraint_kinematics(
 
     distance_squared = float(relative_position @ relative_position)
     distance_squared_rate = 2.0 * float(relative_position @ relative_velocity)
+    distance = float(np.sqrt(distance_squared))
 
     observation = camera.observe(
         observer_position,
@@ -189,10 +202,28 @@ def evaluate_sensing_constraint_kinematics(
     )
     image = observation.image_point.as_array()
 
+    if distance_domain.squared:
+        collision_value = (
+            distance_squared - distance_domain.d_min_conservative**2
+        )
+        range_value = (
+            distance_domain.d_max_conservative**2 - distance_squared
+        )
+        distance_rate = distance_squared_rate
+    else:
+        if distance <= np.finfo(float).eps:
+            raise ValueError(
+                "direct-distance constraint rates are undefined at zero "
+                "relative distance."
+            )
+        distance_rate = float(relative_position @ relative_velocity) / distance
+        collision_value = distance - distance_domain.d_min_conservative
+        range_value = distance_domain.d_max_conservative - distance
+
     values = np.array(
         [
-            distance_squared - distance_domain.d_min_conservative**2,
-            distance_domain.d_max_conservative**2 - distance_squared,
+            collision_value,
+            range_value,
             fov_domain.alpha_h_conservative**2 - image[0] ** 2,
             fov_domain.alpha_v_conservative**2 - image[1] ** 2,
         ],
@@ -200,8 +231,8 @@ def evaluate_sensing_constraint_kinematics(
     )
     rates = np.array(
         [
-            distance_squared_rate,
-            -distance_squared_rate,
+            distance_rate,
+            -distance_rate,
             -2.0 * image[0] * image_rate[0],
             -2.0 * image[1] * image_rate[1],
         ],

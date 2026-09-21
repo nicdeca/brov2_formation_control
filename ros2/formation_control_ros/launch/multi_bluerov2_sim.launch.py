@@ -31,6 +31,10 @@ def _default_px4_dir() -> str:
 
 DEFAULT_PX4_DIR = _default_px4_dir()
 
+
+def _as_bool(value: str) -> bool:
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
 # Gazebo ENU poses: x,y,z,roll,pitch,yaw.
 #
 # The world has been re-anchored so that PX4 local NED uses the same pool
@@ -71,7 +75,15 @@ def _launch_setup(context, *args, **kwargs):
             f"robot_count must lie in [1, {MAX_ROBOTS}], got {robot_count}."
         )
 
-    world = LaunchConfiguration("world").perform(context)
+    world = LaunchConfiguration("world").perform(context).strip()
+    recording_mode = _as_bool(
+        LaunchConfiguration("recording_mode").perform(context)
+    )
+    if recording_mode:
+        world = LaunchConfiguration("recording_world").perform(context).strip()
+        if not world:
+            raise RuntimeError("recording_world must be nonempty in recording mode.")
+
     spawn_delay = float(LaunchConfiguration("spawn_delay").perform(context))
     if spawn_delay < 0.0:
         raise RuntimeError("spawn_delay must be nonnegative.")
@@ -138,6 +150,23 @@ def generate_launch_description() -> LaunchDescription:
             "world",
             default_value="kth_marinarium_docking",
             description="Gazebo world name without .sdf.",
+        ),
+        DeclareLaunchArgument(
+            "recording_mode",
+            default_value="false",
+            description=(
+                "Use the dedicated Gazebo state-recording world. This records the "
+                "Gazebo simulation state without live video encoding, avoiding "
+                "the rendering lag caused by the GUI VideoRecorder."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "recording_world",
+            default_value="kth_marinarium_docking_record",
+            description=(
+                "Gazebo world name used when recording_mode:=true. The world should "
+                "contain gz::sim::systems::LogRecord and no live VideoRecorder."
+            ),
         ),
         DeclareLaunchArgument(
             "robot_count",

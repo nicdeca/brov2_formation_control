@@ -32,12 +32,13 @@ FORMATION_NAMES = [
     "adaptive_D",
 ]
 
-FORMATION_RELATIVE_POSITIONS = [
+FORMATION_RELATIVE_POSITIONS_BASE = [
     -1.80, -0.70,  0.00,
     -1.65, -1.45, -0.40,
     -1.65,  1.45,  0.40,
-    -2.30, -0.55, -0.30,
 ]
+FORMATION_D_BASE = [-2.30, -0.55, -0.30]
+FORMATION_D_BASE_NORM = 2.383799488212043
 
 def _state_settings(context):
     state_source = LaunchConfiguration("state_source").perform(context).strip().lower()
@@ -103,8 +104,6 @@ def _common_parameters(context):
         "workspace_relaxation_recovery_gain": 0.8,
         "workspace_relaxation_domain_margin_ratio": 0.10,
         "workspace_minimum_constraint_margin": 1e-3,
-        "px4_thrust_command_limit": 0.10,
-        "px4_torque_command_limit": 0.10,
         "virtual_linear_gain": float(
             LaunchConfiguration("virtual_linear_gain").perform(context)
         ),
@@ -185,6 +184,58 @@ def _setup(context):
         in ("1", "true", "yes", "on")
     )
 
+    leader_common = dict(common)
+    leader_common.update(
+        {
+            "thrust_derating": float(
+                LaunchConfiguration("leader_thrust_derating").perform(context)
+            ),
+            "px4_thrust_command_limit": float(
+                LaunchConfiguration(
+                    "leader_px4_thrust_command_limit"
+                ).perform(context)
+            ),
+            "px4_torque_command_limit": float(
+                LaunchConfiguration(
+                    "leader_px4_torque_command_limit"
+                ).perform(context)
+            ),
+        }
+    )
+
+    follower_common = dict(common)
+    follower_common.update(
+        {
+            "thrust_derating": float(
+                LaunchConfiguration(
+                    "follower_thrust_derating"
+                ).perform(context)
+            ),
+            "px4_thrust_command_limit": float(
+                LaunchConfiguration(
+                    "follower_px4_thrust_command_limit"
+                ).perform(context)
+            ),
+            "px4_torque_command_limit": float(
+                LaunchConfiguration(
+                    "follower_px4_torque_command_limit"
+                ).perform(context)
+            ),
+        }
+    )
+
+    range_stress_distance = float(
+        LaunchConfiguration("range_stress_distance").perform(context)
+    )
+    if range_stress_distance <= 0.0:
+        raise ValueError("range_stress_distance must be positive.")
+    scale = range_stress_distance / FORMATION_D_BASE_NORM
+    formation_d = [scale * value for value in FORMATION_D_BASE]
+    formation_relative_positions = [
+        *FORMATION_RELATIVE_POSITIONS_BASE,
+        *formation_d,
+    ]
+
     follower_task = {
         "robot_name": follower,
         "parent_robot_name": leader,
@@ -195,7 +246,7 @@ def _setup(context):
         "experiment_phase_topic": PHASE_TOPIC,
         "desired_formation_topic": FORMATION_TOPIC,
         "formation_names": FORMATION_NAMES,
-        "formation_relative_positions": FORMATION_RELATIVE_POSITIONS,
+        "formation_relative_positions": formation_relative_positions,
         "formation_gain": float(
             LaunchConfiguration("formation_gain").perform(context)
         ),
@@ -283,7 +334,7 @@ def _setup(context):
             name="controller",
             output="screen",
             parameters=[
-                common,
+                leader_common,
                 {
                     "robot_name": leader,
                     "odometry_topic": topic(leader),
@@ -292,6 +343,11 @@ def _setup(context):
                     "initialization_position": initial_leader_position,
                     "position_gain": float(
                         LaunchConfiguration("position_gain").perform(context)
+                    ),
+                    "velocity_command_bandwidth": float(
+                        LaunchConfiguration(
+                            "leader_velocity_command_bandwidth"
+                        ).perform(context)
                     ),
                 },
             ],
@@ -309,7 +365,7 @@ def _setup(context):
             namespace=follower,
             name="controller",
             output="screen",
-            parameters=[common, follower_task],
+            parameters=[follower_common, follower_task],
         ),
         Node(
             package="formation_control_ros",
@@ -350,7 +406,73 @@ def generate_launch_description() -> LaunchDescription:
                 "adaptive mission."
             ),
         ),
+        DeclareLaunchArgument(
+            "leader_thrust_derating",
+            default_value="1.0",
+            description=(
+                "Scale applied only to the leader's modeled T200 thruster "
+                "bounds. Keep 1.0 for the adaptive stress experiment."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "follower_thrust_derating",
+            default_value="1.0",
+            description=(
+                "Scale applied only to the follower's modeled T200 thruster "
+                "bounds. Use 0.25 for the bounded-authority stress test."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "leader_px4_thrust_command_limit",
+            default_value="0.10",
+            description=(
+                "Normalized PX4 thrust-setpoint clipping limit for the "
+                "leader. For the aggressive Gazebo stress test use 0.60."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "follower_px4_thrust_command_limit",
+            default_value="0.10",
+            description=(
+                "Normalized PX4 thrust-setpoint clipping limit for the "
+                "follower. Use 0.50 with follower_thrust_derating=0.25 so "
+                "the QP thruster box, rather than this interface clamp, is "
+                "the intended limiting mechanism."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "leader_px4_torque_command_limit",
+            default_value="0.10",
+            description=(
+                "Normalized PX4 torque-setpoint clipping limit for the leader."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "follower_px4_torque_command_limit",
+            default_value="0.10",
+            description=(
+                "Normalized PX4 torque-setpoint clipping limit for the follower."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "range_stress_distance",
+            default_value="2.383799488212043",
+            description=(
+                "Norm [m] of formation D while preserving its original "
+                "direction. Use 2.20 for the interior-equilibrium stress test."
+            ),
+        ),
         DeclareLaunchArgument("position_gain", default_value="2.0"),
+        DeclareLaunchArgument(
+            "leader_velocity_command_bandwidth",
+            default_value="0.2",
+            description=(
+                "Bandwidth [1/s] of the leader velocity-command reference "
+                "filter. The nominal default remains 0.2. For the adaptive "
+                "stress mission use 6.0 so short velocity pulses remain "
+                "genuinely fast."
+            ),
+        ),
         DeclareLaunchArgument("formation_gain", default_value="1.4"),
         DeclareLaunchArgument("virtual_linear_gain", default_value="0.55"),
         DeclareLaunchArgument("virtual_angular_gain", default_value="0.80"),

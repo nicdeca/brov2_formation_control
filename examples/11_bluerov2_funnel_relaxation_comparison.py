@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Challenging pure-Python demonstration of sensing-funnel relaxation.
+"""Challenging pure-Python demonstration of adaptive sensing-domain relaxation.
 
 The followers start inside the conservative sensing set with outward linear
-velocity and angular-rate disturbances.  The secondary funnel dynamics must
+velocity and angular-rate disturbances.  The secondary adaptive-domain dynamics must
 temporarily enlarge the conservative range/FoV domain toward the physical
 domain.  The selected demonstration edge crosses its conservative range limit
-while remaining strictly inside the adaptive funnel and physical sensor limit.
-The funnel then recovers to the robust conservative set after the transient.
+while remaining strictly inside the adaptive domain and physical sensor limit.
+The adaptive domain then recovers to the robust conservative set after the transient.
 """
 
 from __future__ import annotations
@@ -97,11 +97,14 @@ def simulate_relaxation_case(
         stress_test=True,
         stress_scale=stress_scale,
         relaxation_recovery_gain=0.8,
-        relaxation_domain_margin_ratio=0.1,
+        relaxation_barrier_gain=0.20,
+        relaxation_activation_on_ratio=0.10,
+        relaxation_activation_off_ratio=0.30,
+        relaxation_infeasibility_epsilon=1e-3,
         thruster_force_limits=GAZEBO_THRUSTER_FORCE_LIMITS,
     )
     return RelaxationRun(
-        label="adaptive relaxed funnel",
+        label="adaptive domain",
         adaptive=True,
         scenario=result[0],
         trajectory=result[1],
@@ -535,7 +538,7 @@ def plot_comparison(
         axes.set(xlabel="x [m]", ylabel="y [m]", zlabel="z [m]", title=run.label)
         if panel == 1:
             axes.legend()
-    trajectories.suptitle("Identical sensing stress with and without funnel relaxation")
+    trajectories.suptitle("Identical sensing stress with and without adaptive-domain relaxation")
     trajectories.tight_layout()
     figures["trajectory_comparison"] = trajectories
 
@@ -581,7 +584,7 @@ def plot_comparison(
     sensing_axes[-1].set_xlabel("time [s]")
     sensing.suptitle(
         "Sensing coordinate of each follower→parent edge\n"
-        "solid: relaxed funnel; dotted: fixed conservative funnel"
+        "solid: adaptive domain; dotted: fixed conservative domain"
     )
     handles, legend_labels = sensing_axes[0].get_legend_handles_labels()
     sensing.legend(
@@ -610,12 +613,12 @@ def plot_comparison(
         fixed.trajectory.times,
         fixed_values,
         linestyle=":",
-        label="fixed funnel",
+        label="fixed domain",
     )
     coordinate_axes.plot(
         relaxed.trajectory.times,
         relaxed_values,
-        label="relaxed funnel",
+        label="adaptive domain",
     )
     coordinate_axes.plot(
         relaxed.trajectory.times,
@@ -698,7 +701,7 @@ def plot_comparison(
     relaxation_axes.set(
         xlabel="time [s]",
         ylabel="maximum normalized relaxation",
-        title="Adaptive funnel enlargement and recovery",
+        title="Adaptive-domain enlargement and recovery",
         ylim=(-0.02, 1.02),
     )
     relaxation_axes.grid(True, alpha=0.3)
@@ -814,7 +817,7 @@ def plot_demo(
     adaptive_limit = effective_upper_limit(run, channel, rho)
     violation, (coordinate_axes, margin_axes) = plt.subplots(2, 1, sharex=True)
     coordinate_axes.plot(times, values, label=f"agent {edge.observer}→{edge.target}")
-    coordinate_axes.plot(times, adaptive_limit, "--", label="adaptive funnel limit")
+    coordinate_axes.plot(times, adaptive_limit, "--", label="adaptive-domain limit")
     coordinate_axes.axhline(
         conservative,
         color="tab:orange",
@@ -844,7 +847,7 @@ def plot_demo(
     adaptive_margin = adaptive_limit - values
     physical_margin = physical - values
     margin_axes.plot(times, conservative_margin, label="conservative margin")
-    margin_axes.plot(times, adaptive_margin, "--", label="adaptive-funnel margin")
+    margin_axes.plot(times, adaptive_margin, "--", label="adaptive-domain margin")
     margin_axes.plot(times, physical_margin, ":", label="physical margin")
     margin_axes.axhline(0.0, color="black", linewidth=0.8)
     margin_axes.fill_between(
@@ -859,7 +862,7 @@ def plot_demo(
     margin_axes.grid(True, alpha=0.3)
     margin_axes.legend(ncol=3)
     violation.suptitle(
-        f"Conservative {channel} violation inside the adaptive funnel: "
+        f"Conservative {channel} violation inside the adaptive domain: "
         f"agent {edge.observer}→{edge.target}"
     )
     violation.tight_layout()
@@ -878,7 +881,7 @@ def plot_demo(
     relaxation_axes.set(
         xlabel="time [s]",
         ylabel="maximum normalized relaxation",
-        title="Adaptive funnel enlargement and recovery",
+        title="Adaptive-domain enlargement and recovery",
         ylim=(-0.02, 1.02),
     )
     relaxation_axes.grid(True, alpha=0.3)
@@ -966,7 +969,7 @@ def build_animations(
             show_body_forward=False,
             trail_length=150,
             frame_stride=frame_stride,
-            title="Challenging adaptive-funnel relaxation",
+            title="Challenging adaptive-adaptive-domain relaxation",
         )
     }
 

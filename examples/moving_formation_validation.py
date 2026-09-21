@@ -330,10 +330,36 @@ def build_controller_design(
 def build_relaxation_policy(
     distance_domain: DistanceDomain,
     fov_domain: FieldOfViewDomain,
+    desired_relative_position: np.ndarray,
     *,
-    recovery_gain: float,
-    domain_margin_ratio: float,
+    recovery_gain: float = 0.8,
+    barrier_gain: float = 0.20,
+    activation_on_ratio: float = 0.10,
+    activation_off_ratio: float = 0.30,
+    infeasibility_epsilon: float = 1e-3,
 ) -> FunnelRelaxationPolicy:
+    """Build the paper adaptive-domain controller for one follower edge."""
+    desired_relative = np.asarray(desired_relative_position, dtype=float)
+    desired_image = NormalizedImagePoint(0.0, 0.0)
+    desired_values = np.array(
+        [
+            MinimumDistanceConstraint(
+                distance_domain.d_min_conservative,
+                squared=distance_domain.squared,
+            ).evaluate(desired_relative).value,
+            MaximumDistanceConstraint(
+                distance_domain.d_max_conservative,
+                squared=distance_domain.squared,
+            ).evaluate(desired_relative).value,
+            HorizontalFieldOfViewConstraint(
+                fov_domain.alpha_h_conservative
+            ).evaluate(desired_image).value,
+            VerticalFieldOfViewConstraint(
+                fov_domain.alpha_v_conservative
+            ).evaluate(desired_image).value,
+        ],
+        dtype=float,
+    )
     return FunnelRelaxationPolicy(
         maximum_enlargement=np.array(
             [
@@ -344,9 +370,14 @@ def build_relaxation_policy(
             ],
             dtype=float,
         ),
+        desired_conservative_values=desired_values,
+        barrier_weights=np.array([0.18, 0.18, 0.25, 0.25], dtype=float),
         recovery_gain=recovery_gain,
-        domain_margin_ratio=domain_margin_ratio,
-        minimum_constraint_margin=1e-5,
+        barrier_gain=barrier_gain,
+        activation_on_ratio=activation_on_ratio,
+        activation_off_ratio=activation_off_ratio,
+        infeasibility_epsilon=infeasibility_epsilon,
+        minimum_constraint_margin=1e-8,
     )
 
 
@@ -548,9 +579,12 @@ def simulate(
     virtual_linear_speed_limit: float,
     virtual_angular_speed_limit: float,
     relaxation_recovery_gain: float,
-    relaxation_domain_margin_ratio: float,
-    slack_linear_penalty: float,
-    slack_quadratic_penalty: float,
+    relaxation_barrier_gain: float = 0.20,
+    relaxation_activation_on_ratio: float = 0.10,
+    relaxation_activation_off_ratio: float = 0.30,
+    relaxation_infeasibility_epsilon: float = 1e-3,
+    slack_linear_penalty: float = 100.0,
+    slack_quadratic_penalty: float = 5e3,
     realism: RealismConfig | None = None,
     random_seed: int = 7,
     scenario: FormationScenario | None = None,
@@ -634,12 +668,6 @@ def simulate(
         reference=initial_leader_reference,
     )
 
-    relaxation = build_relaxation_policy(
-        distance_domain,
-        fov_domain,
-        recovery_gain=relaxation_recovery_gain,
-        domain_margin_ratio=relaxation_domain_margin_ratio,
-    )
     enabled_relaxation = np.ones(4, dtype=bool)
     relaxation_state = np.zeros((scenario.n_agents, 4), dtype=float)
     fallback_mode = np.zeros(scenario.n_agents, dtype=bool)
@@ -656,6 +684,19 @@ def simulate(
         )
         for edge in scenario.graph
     }
+    relaxation_policies = {
+        edge.observer: build_relaxation_policy(
+            distance_domain,
+            fov_domain,
+            scenario.desired_relative_position(edge.observer, edge.target),
+            recovery_gain=relaxation_recovery_gain,
+            barrier_gain=relaxation_barrier_gain,
+            activation_on_ratio=relaxation_activation_on_ratio,
+            activation_off_ratio=relaxation_activation_off_ratio,
+            infeasibility_epsilon=relaxation_infeasibility_epsilon,
+        )
+        for edge in scenario.graph
+    }
 
     if adaptive:
         for edge in scenario.graph:
@@ -667,16 +708,16 @@ def simulate(
                 states[edge.observer],
                 states[edge.target],
             )
-            projected, _ = relaxation.project_to_current_domain(
-                relaxation_state[edge.observer],
+            relaxation_state[edge.observer] = relaxation_policies[
+                edge.observer
+            ].initialize_for_constraint_values(
                 kinematics.values,
                 enabled=enabled_relaxation,
             )
-            relaxation_state[edge.observer] = projected
 
     follower_filters: dict[int, np.ndarray] = {}
     for edge in scenario.graph:
-        enlargement = relaxation.enlargement(
+        enlargement = relaxation_policies[edge.observer].enlargement(
             relaxation_state[edge.observer]
         )
         potential = build_edge_potential(
@@ -894,14 +935,12 @@ def simulate(
                 )
 
                 if adaptive:
-                    projected, _ = relaxation.project_to_current_domain(
+                    relaxation_state[observer], _ = relaxation_policies[observer].project_to_current_domain(
                         relaxation_state[observer],
                         kinematics.values,
                         enabled=enabled_relaxation,
                     )
-                    relaxation_state[observer] = projected
-
-                enlargement = relaxation.enlargement(
+                enlargement = relaxation_policies[observer].enlargement(
                     relaxation_state[observer]
                 )
                 potential = build_edge_potential(
@@ -931,15 +970,6 @@ def simulate(
                     filter_state=follower_filters[observer],
                 )
 
-                relaxation_evaluation = None
-                if adaptive:
-                    relaxation_evaluation = relaxation.evaluate(
-                        relaxation_state[observer],
-                        conservative_values=kinematics.values,
-                        conservative_rates=kinematics.rates,
-                        enabled=enabled_relaxation,
-                        sample_time=dt,
-                    )
             except (FunnelRelaxationInfeasibleError, ValueError) as error:
                 fallback_mode[observer] = True
                 fallback_positions[observer] = states[observer, :3]
@@ -986,12 +1016,19 @@ def simulate(
                 ] = evaluation.actuation_margin
 
             if adaptive:
-                assert relaxation_evaluation is not None
-                next_relaxation_state[observer] = np.clip(
-                    relaxation_state[observer]
-                    + dt * relaxation_evaluation.selected_rate,
-                    0.0,
-                    1.0,
+                required = (
+                    0.0
+                    if evaluation.required_slack is None
+                    else max(float(evaluation.required_slack), 0.0)
+                )
+                next_relaxation_state[observer], _ = relaxation_policies[
+                    observer
+                ].advance(
+                    relaxation_state[observer],
+                    conservative_values=kinematics.values,
+                    required_slack=required,
+                    enabled=enabled_relaxation,
+                    sample_time=dt,
                 )
 
             follower_filters[observer] = filter_integrator.step(
@@ -1644,10 +1681,15 @@ def parser_for_motion(
         type=float,
         default=0.8,
     )
+    parser.add_argument("--relaxation-barrier-gain", type=float, default=0.20)
     parser.add_argument(
-        "--relaxation-domain-margin-ratio",
-        type=float,
-        default=0.1,
+        "--relaxation-activation-on-ratio", type=float, default=0.10
+    )
+    parser.add_argument(
+        "--relaxation-activation-off-ratio", type=float, default=0.30
+    )
+    parser.add_argument(
+        "--relaxation-infeasibility-epsilon", type=float, default=1e-3
     )
     parser.add_argument(
         "--slack-linear-penalty",
@@ -1741,9 +1783,10 @@ def main(default_motion: MotionMode) -> None:
         virtual_linear_speed_limit=args.virtual_linear_speed_limit,
         virtual_angular_speed_limit=args.virtual_angular_speed_limit,
         relaxation_recovery_gain=args.relaxation_recovery_gain,
-        relaxation_domain_margin_ratio=(
-            args.relaxation_domain_margin_ratio
-        ),
+        relaxation_barrier_gain=args.relaxation_barrier_gain,
+        relaxation_activation_on_ratio=args.relaxation_activation_on_ratio,
+        relaxation_activation_off_ratio=args.relaxation_activation_off_ratio,
+        relaxation_infeasibility_epsilon=args.relaxation_infeasibility_epsilon,
         slack_linear_penalty=args.slack_linear_penalty,
         slack_quadratic_penalty=args.slack_quadratic_penalty,
         realism=realism,

@@ -27,12 +27,16 @@ class DistanceDomain:
         d_min_conservative < ||p_ij|| < d_max_conservative.
 
     The conservative domain must be a strict subset of the physical one.
+    By default, additive relaxation is defined on the direct-distance
+    constraints used in the paper.  Set ``squared=True`` to retain the legacy
+    squared-distance parametrization.
     """
 
     d_min: float
     d_max: float
     d_min_conservative: float
     d_max_conservative: float
+    squared: bool = False
 
     def __post_init__(self) -> None:
         if self.d_min < 0.0:
@@ -48,13 +52,17 @@ class DistanceDomain:
 
     @property
     def collision_enlargement_max(self) -> float:
-        """Maximum additive enlargement in the squared-distance constraint."""
-        return self.d_min_conservative**2 - self.d_min**2
+        """Maximum additive enlargement of the collision constraint."""
+        if self.squared:
+            return self.d_min_conservative**2 - self.d_min**2
+        return self.d_min_conservative - self.d_min
 
     @property
     def range_enlargement_max(self) -> float:
-        """Maximum additive enlargement in the squared-range constraint."""
-        return self.d_max**2 - self.d_max_conservative**2
+        """Maximum additive enlargement of the range constraint."""
+        if self.squared:
+            return self.d_max**2 - self.d_max_conservative**2
+        return self.d_max - self.d_max_conservative
 
     def effective_minimum_distance(self, enlargement: float) -> float:
         """Return the minimum distance associated with ``h_delta^c + rho``."""
@@ -63,7 +71,9 @@ class DistanceDomain:
             self.collision_enlargement_max,
             name="collision enlargement",
         )
-        return float(np.sqrt(self.d_min_conservative**2 - enlargement))
+        if self.squared:
+            return float(np.sqrt(self.d_min_conservative**2 - enlargement))
+        return float(self.d_min_conservative - enlargement)
 
     def effective_maximum_distance(self, enlargement: float) -> float:
         """Return the maximum distance associated with ``h_Delta^c + rho``."""
@@ -72,7 +82,9 @@ class DistanceDomain:
             self.range_enlargement_max,
             name="range enlargement",
         )
-        return float(np.sqrt(self.d_max_conservative**2 + enlargement))
+        if self.squared:
+            return float(np.sqrt(self.d_max_conservative**2 + enlargement))
+        return float(self.d_max_conservative + enlargement)
 
 
 @dataclass(frozen=True)

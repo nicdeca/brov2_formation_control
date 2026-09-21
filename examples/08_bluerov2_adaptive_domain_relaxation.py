@@ -134,7 +134,8 @@ def main() -> None:
     parser.add_argument(
         "--thrust-derating",
         type=float,
-        default=1.0,
+        default=0.35,
+        help="limited thrust authority used by the adaptive-domain stress test",
     )
     parser.add_argument(
         "--stress-scale",
@@ -145,11 +146,6 @@ def main() -> None:
         "--relaxation-recovery-gain",
         type=float,
         default=0.8,
-    )
-    parser.add_argument(
-        "--relaxation-domain-margin-ratio",
-        type=float,
-        default=0.1,
     )
     parser.add_argument(
         "--observer",
@@ -206,7 +202,6 @@ def main() -> None:
         stress_test=True,
         stress_scale=args.stress_scale,
         relaxation_recovery_gain=args.relaxation_recovery_gain,
-        relaxation_domain_margin_ratio=(args.relaxation_domain_margin_ratio),
     )
 
     if simulation_status.fallback_occurred:

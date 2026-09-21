@@ -338,12 +338,6 @@ def simulate_full_mission(*, dt: float = 0.02) -> FiveRobotMissionResult:
 
     camera = build_camera()
     distance_domain, fov_domain = build_domains()
-    relaxation = build_relaxation_policy(
-        distance_domain,
-        fov_domain,
-        recovery_gain=0.8,
-        domain_margin_ratio=0.1,
-    )
     enabled_relaxation = np.ones(4, dtype=bool)
     relaxation_state = np.zeros((scenario.n_agents, 4), dtype=float)
 
@@ -356,6 +350,23 @@ def simulate_full_mission(*, dt: float = 0.02) -> FiveRobotMissionResult:
         }
 
     templates = build_templates()
+
+    def build_policies() -> dict[int, object]:
+        return {
+            edge.observer: build_relaxation_policy(
+                distance_domain,
+                fov_domain,
+                scenario.desired_relative_position(edge.observer, edge.target),
+                recovery_gain=0.8,
+                barrier_gain=0.20,
+                activation_on_ratio=0.10,
+                activation_off_ratio=0.30,
+                infeasibility_epsilon=1e-3,
+            )
+            for edge in scenario.graph
+        }
+
+    relaxation_policies = build_policies()
     follower_filters: dict[int, np.ndarray] = {}
     for edge in scenario.graph:
         kinematics = evaluate_sensing_constraint_kinematics(
@@ -366,8 +377,9 @@ def simulate_full_mission(*, dt: float = 0.02) -> FiveRobotMissionResult:
             states[edge.observer],
             states[edge.target],
         )
-        relaxation_state[edge.observer], _ = relaxation.project_to_current_domain(
-            relaxation_state[edge.observer],
+        relaxation_state[edge.observer] = relaxation_policies[
+            edge.observer
+        ].initialize_for_constraint_values(
             kinematics.values,
             enabled=enabled_relaxation,
         )
@@ -379,7 +391,9 @@ def simulate_full_mission(*, dt: float = 0.02) -> FiveRobotMissionResult:
             edge.observer,
             edge.target,
             templates[edge.observer],
-            relaxation.enlargement(relaxation_state[edge.observer]),
+            relaxation_policies[edge.observer].enlargement(
+                relaxation_state[edge.observer]
+            ),
             adaptive=True,
             formation_gain=2.0,
         )
@@ -463,9 +477,12 @@ def simulate_full_mission(*, dt: float = 0.02) -> FiveRobotMissionResult:
         reference_velocities[sample] = reference.velocity
         relaxation_history[sample] = relaxation_state
         for agent in range(scenario.n_agents):
-            relaxation_enlargement[sample, agent] = relaxation.enlargement(
-                relaxation_state[agent]
-            )
+            if agent in relaxation_policies:
+                relaxation_enlargement[sample, agent] = relaxation_policies[
+                    agent
+                ].enlargement(relaxation_state[agent])
+            else:
+                relaxation_enlargement[sample, agent] = 0.0
             positions[sample, agent] = states[agent, :3]
             quaternions[sample, agent] = states[agent, 3:7]
             velocities[sample, agent] = inertial_linear_velocity(model, states[agent])
@@ -499,6 +516,7 @@ def simulate_full_mission(*, dt: float = 0.02) -> FiveRobotMissionResult:
             active_formation = phase.formation
             scenario = scenario_with_formation(scenario, active_formation)
             templates = build_templates()
+            relaxation_policies = build_policies()
 
         command = np.asarray(phase.velocity_command, dtype=float)
         leader_reference = reference_model.evaluate(reference_state, command)
@@ -548,7 +566,7 @@ def simulate_full_mission(*, dt: float = 0.02) -> FiveRobotMissionResult:
                 states[observer],
                 states[target],
             )
-            relaxation_state[observer], _ = relaxation.project_to_current_domain(
+            relaxation_state[observer], _ = relaxation_policies[observer].project_to_current_domain(
                 relaxation_state[observer],
                 kinematics.values,
                 enabled=enabled_relaxation,
@@ -561,7 +579,9 @@ def simulate_full_mission(*, dt: float = 0.02) -> FiveRobotMissionResult:
                 observer,
                 target,
                 templates[observer],
-                relaxation.enlargement(relaxation_state[observer]),
+                relaxation_policies[observer].enlargement(
+                    relaxation_state[observer]
+                ),
                 adaptive=True,
                 formation_gain=2.0,
             )
@@ -572,19 +592,21 @@ def simulate_full_mission(*, dt: float = 0.02) -> FiveRobotMissionResult:
                 edge_potential=potential,
                 filter_state=follower_filters[observer],
             )
-            relaxation_evaluation = relaxation.evaluate(
+            required = (
+                0.0
+                if evaluation.required_slack is None
+                else max(float(evaluation.required_slack), 0.0)
+            )
+            (
+                next_relaxation_state[observer],
+                relaxation_rates[step, observer],
+            ) = relaxation_policies[observer].advance(
                 relaxation_state[observer],
                 conservative_values=kinematics.values,
-                conservative_rates=kinematics.rates,
+                required_slack=required,
                 enabled=enabled_relaxation,
                 sample_time=step_dt,
             )
-            next_relaxation_state[observer] = np.clip(
-                relaxation_state[observer] + step_dt * relaxation_evaluation.selected_rate,
-                0.0,
-                1.0,
-            )
-            relaxation_rates[step, observer] = relaxation_evaluation.selected_rate
             controller_times[step, observer] = perf_counter() - start_time
             controls[step, observer] = (
                 design.representative_thruster_forces(evaluation)
